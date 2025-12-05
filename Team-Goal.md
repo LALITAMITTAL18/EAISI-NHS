@@ -22,7 +22,7 @@
 
 | Role | Team Member(s) | Responsibilities |
 |------|----------------|------------------|
-| **Business Lead** | Mendal | Business requirements, stakeholder communication, value delivery |
+| **Business Lead** | Mendel | Business requirements, stakeholder communication, value delivery |
 | **Data Lead** | All Team Members | Data collection, preprocessing, quality assurance, feature engineering |
 | **Model & Evaluation Lead** | TBD | Model development, hyperparameter tuning, performance evaluation |
 | **Explainability Lead** | TBD | Model interpretation, SHAP/LIME analysis, documentation |
@@ -33,7 +33,7 @@
 |----------|-------|-------|
 | **Meeting Coordination** | Gino | Schedule meetings, prepare agendas, facilitate discussions |
 | **Task Monitoring** | Julia | Track progress, identify blockers, update task boards |
-| **Report Submission** | Mendal | Compile deliverables, submit reports, documentation |
+| **Report Submission** | Mendel | Compile deliverables, submit reports, documentation |
 | **GitHub Management** | Lalita | Repository management, code reviews, version control |
 
 ---
@@ -47,7 +47,7 @@
 - [ ] Translate business goals into ML objectives
 - [ ] Document assumptions and constraints
 
-**Lead**: Mendal (Business Lead)
+**Lead**: Mendel (Business Lead)
 
 ### 2. Data Understanding
 - [ ] Collect initial data from NHS sources
@@ -214,7 +214,7 @@ By the end of this project, the team will:
 - Weekly progress reports
 - Blocker escalation protocol
 
-### Reporting (Submitted by Mendal)
+### Reporting (Submitted by Mendel)
 - Weekly progress reports
 - Phase completion reports
 - Final project documentation
