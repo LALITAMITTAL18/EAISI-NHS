@@ -28,9 +28,11 @@ This repository contains the complete NHS Group Project deliverables for the EAI
 | Role | Team Member | Responsibilities |
 |------|-------------|------------------|
 | **Business Lead** | Mendal | Business requirements, stakeholder communication, value delivery |
-| **Data Lead** | All Team Members | Data collection, preprocessing, quality assurance, feature engineering |
-| **Model & Evaluation Lead** | TBD | Model development, hyperparameter tuning, performance evaluation |
+| **Data Lead** (data engineering & scientist tasks) | All Team Members | Data collection, preprocessing, quality assurance, feature engineering |
+| **Model & Evaluation Lead** (data scientist & ML engineer tasks) | TBD | Model development, hyperparameter tuning, performance evaluation |
 | **Explainability Lead** | TBD | Model interpretation, SHAP/LIME analysis, documentation |
+
+Regarding the last 2 roles, it might be interesting to state that all team members contribute in decision about models and analyzing these models. Then either we divide the models over the group members to be developed or one persons does it and we discuss afterwards? 
 
 ### Operational Roles
 | Function | Owner | Tasks |
