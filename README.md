@@ -13,7 +13,7 @@ This repository contains the complete NHS Group Project deliverables for the EAI
 - **CRISP-DM Mastery**: Demonstrate confidence in applying CRISP-DM methodology to real-world scenarios  
 - **Production-Ready Solution**: Deliver maintainable, standardized, and adaptable ML products
 - **Model Explainability**: Create explainable models to gain customer confidence and trust (Input GH: We should address something GDPR and/or Bias (towards for example certains groups within dataset)? > making sure to exclude the last one)
-- **LLM Integration**: Incorporate LLM capabilities and automation into the workflow
+- **LLM Integration**: Incorporate LLM capabilities and automation into the workflow (Input GH: We should consider to include something about hallucination in this as that can be especially harmfull in healthcare) 
 - **Data Storytelling**: Develop compelling data visualizations and insights
 - **Model Evaluation**: Implement robust evaluation frameworks for continuous assessment (Input GH: Maybe already add something about a criteria such as minimizing false negatives)
 
