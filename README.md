@@ -15,7 +15,8 @@ This repository contains the complete NHS Group Project deliverables for the EAI
 - **Model Explainability**: Create explainable models to gain customer confidence and trust
 - **LLM Integration**: Incorporate LLM capabilities and automation into the workflow
 - **Data Storytelling**: Develop compelling data visualizations and insights
-- **Model Evaluation**: Implement robust evaluation frameworks for continuous assessment
+- **Model Evaluation**: Implement robust evaluation frameworks for continuous assessment (Input GH: Maybe already add something about a criteria such as minimizing false negatives)
+
 
 ---
 
