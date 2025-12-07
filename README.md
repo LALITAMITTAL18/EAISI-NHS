@@ -85,7 +85,9 @@ EAISI-NHS/
 
 ### Primary Contact
 **Program Coordinator**: [professionaleducation.eaisi@tue.nl](mailto:professionaleducation.eaisi@tue.nl)
+
 **Case Owner**: [joran.lokkerbol@gmail.com](mailto:joran.lokkerbol@gmail.com)
+
 **Practitioners**: [pieter@innovatewithdata.nl](mailto:pieter@innovatewithdata.nl)
 
 
