@@ -17,6 +17,8 @@ This repository contains the complete NHS Group Project deliverables for the EAI
 - **Data Storytelling**: Develop compelling data visualizations and insights
 - **Model Evaluation**: Implement robust evaluation frameworks for continuous assessment (Input GH: Maybe already add something about a criteria such as minimizing false negatives)
 
+- Input GH: **Collaboration**: Ability to realize a ML project by working as a group (through understanding all roles that are included, learning to adopt roles, providing feedback to optimize, etc...).    
+
 
 ---
 
