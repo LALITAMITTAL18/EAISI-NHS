@@ -39,7 +39,7 @@ Regarding the last 2 roles, it might be interesting to state that all team membe
 |----------|-------|-------|
 | **Meeting Coordination** | Gino | Schedule meetings, prepare agendas, facilitate discussions |
 | **Task Monitoring** | Julia | Track progress, identify blockers, update task boards |
-| **Report Submission** | Mendal | Compile deliverables, submit reports, documentation |
+| **Report Submission** | Mendel | Compile deliverables, submit reports, documentation |
 | **GitHub Management** | Lalita | Repository management, code reviews, version control |
 
 ---
