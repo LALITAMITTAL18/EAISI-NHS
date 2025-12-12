@@ -158,6 +158,6 @@ The project will be considered successful when:
 ---
 
 **Repository**: [EAISI-NHS](https://github.com/LALITAMITTAL18/EAISI-NHS)  
-**Team**: Gino, Julia, Mendal, Lalita  
+**Team**: Gino, Julia, Mendel, Lalita  
 **Program**: EAISI Academy - Applications of Data & AI  
 **Institution**: Eindhoven University of Technology
