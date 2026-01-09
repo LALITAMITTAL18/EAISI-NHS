@@ -1,3 +1,4 @@
+'''
 graph TD
     %% 1. Defined first to stay at the top
     subgraph Strategic_Alignment ["Strategic & Performance Goals"]
@@ -32,3 +33,5 @@ graph TD
 
     %% 3. Arrow from Top to Bottom using the 'backwards' syntax
     Strategic_Alignment -- "Explain Patient why surgery will fail" --> Model_Variables
+
+    '''
