@@ -2,6 +2,9 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../../../EAISI/2025 10 ames-housing/pieterov"
 		}
 	],
 	"settings": {}
