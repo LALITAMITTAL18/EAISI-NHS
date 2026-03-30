@@ -208,3 +208,4 @@ __marimo__/
 .DS_Store
 LalitaPersonalQuestion.md
 .claude/settings.local.json
+notebooks/Experiment/Knee/models/all_results_cache.joblib
