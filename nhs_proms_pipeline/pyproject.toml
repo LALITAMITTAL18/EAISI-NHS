@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nhs-proms-pipeline"
+version = "1.0.0"
+description = "Production-ready NHS PROMs ML pipeline for Hip and Knee replacement outcome prediction"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "EAISI NHS Team" }]
+keywords = ["nhs", "proms", "machine-learning", "healthcare", "outcomes"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Healthcare Industry",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "polars>=0.20.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "scikit-learn>=1.4.0",
+    "xgboost>=2.0.0",
+    "joblib>=1.3.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.13.0",
+    "scipy>=1.11.0",
+    "pyarrow>=14.0.0",
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+]
+
+[project.scripts]
+nhs-train = "nhs_proms_pipeline.cli.train:app"
+nhs-predict = "nhs_proms_pipeline.cli.predict:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=nhs_proms_pipeline --cov-report=term-missing"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
