@@ -115,6 +115,62 @@
 
 ---
 
+### 3.6 — Multi-Task Learning: Joint Regression + Classification
+
+**Goal:** Train a single two-head PyTorch MLP that simultaneously predicts `health_gain` (regression) and `NO_Benefit` probability (binary classification, `health_gain < 7`). Hypothesis: the shared trunk allows the classification signal to regularise the regression head and vice versa.
+
+**Strategy:** Same data pipeline as 3.5 (`2.0-preprocessing.parquet`, listwise deletion, year-based split). Shared trunk (Linear → BatchNorm → ReLU → Dropout, 2–4 layers), branching into a regression head (MSE) and a classification head (BCE). Combined loss: `alpha × MSE + (1−alpha) × BCE`. Optuna over 25 trials (TPE sampler), with 15% chronological hold-out for HPO validation.
+
+**Results:**
+
+| Task | Metric | Multi-Task MLP | Single-Task Baseline | Delta |
+|---|---|---|---|---|
+| Regression | RMSE | 8.1907 | 8.0186 (CatBoost 3.2) | −0.172 *(worse)* |
+| Regression | R² | 0.2968 | 0.2952 | +0.002 *(negligible)* |
+| Classification | PR-AUC | 0.3427 | 0.355 (CatBoost 3.1) | −0.012 *(worse)* |
+| Classification | ROC-AUC | 0.7129 | 0.724 (CatBoost 3.1) | −0.011 *(worse)* |
+
+Residuals: mean = 0.24, std = 8.19.
+
+**Key finding:** Multi-task learning delivers no improvement on either task. The regression RMSE is 0.17 points *worse* than the CatBoost baseline, and the classification PR-AUC is 0.012 points *worse* than the dedicated classifier. The shared trunk does not successfully transfer signal between tasks — if anything, the two objectives interfere rather than regularise each other. MLP architectures, even with joint training, consistently underperform gradient-boosted trees on this tabular dataset.
+
+**Impact: None.** Both heads are outperformed by their dedicated single-task baselines.
+
+---
+
+### 3.7 — Ordinal Regression: Binned Health Gain (CatBoost MultiClass)
+
+**Goal:** Bin `health_gain` into four clinically meaningful categories and train a CatBoost multi-class classifier. Hypothesis: ordinal classification may be easier to learn than exact regression, and bins map directly to clinical decisions.
+
+**Bins:**
+
+| Class | Label | Condition | Train % | Bin Mean (train) |
+|---|---|---|---|---|
+| 0 | Worsened | `health_gain < 0` | ~5% | −5.0 |
+| 1 | Minimal benefit | `0 ≤ health_gain < 7` | ~12% | 3.5 |
+| 2 | Moderate benefit | `7 ≤ health_gain < 15` | ~33% | 10.9 |
+| 3 | Strong benefit | `health_gain ≥ 15` | ~50% | 23.1 |
+
+**Strategy:** Same data pipeline as 3.5/3.6. Optuna 40 trials minimising ordinal MAE in 5-fold CV. Final model evaluated by: (a) ordinal metrics in bin space, and (b) a derived RMSE by mapping predicted class → training-set bin mean, for a fair comparison against the regression baseline.
+
+**Results:**
+
+| Metric | Value | Baseline | Delta |
+|---|---|---|---|
+| Exact accuracy | 67.0% | — | — |
+| Adjacent (±1 bin) accuracy | **89.5%** | — | — |
+| Ordinal MAE (bin space) | 0.460 | — | — |
+| Derived health_gain RMSE | 9.8655 | 8.0186 | **−1.847 *(worse)*** |
+| Derived health_gain R² | −0.020 | 0.295 | **−0.315 *(worse)*** |
+
+The confusion matrix shows the model is heavily biased toward predicting "Strong benefit" (class 3), which dominates the training set (~50%). The Worsened and Minimal classes are almost entirely absorbed into Moderate or Strong predictions.
+
+**Key finding:** Ordinal regression is substantially worse than direct regression for RMSE comparison. The derived R² of −0.020 means the binned model performs *below a naïve mean predictor* when evaluated on the continuous `health_gain` scale. The adjacent accuracy of 89.5% looks reasonable on the surface, but it is largely driven by the class imbalance — the model almost always predicts "Strong" or "Moderate", which are adjacent to each other and together account for ~83% of the data.
+
+**Impact: None — significantly worse.** Ordinal binning loses within-bin precision and cannot compete with continuous regression for RMSE. The approach is useful only if the clinical decision genuinely requires a 4-category output and RMSE is not the success criterion.
+
+---
+
 ## Why We Cannot Improve Further
 
 The RMSE ≈ 8.0 / R² ≈ 0.30 ceiling is **not a modelling problem — it is a data problem.**
@@ -182,21 +238,11 @@ The current data is 6-month post-op. The **1-year OKS** has lower measurement no
 ### 4. Quantile Regression / Prediction Intervals
 Rather than predicting a point estimate, fit **quantile regression** (e.g., LightGBM with `objective='quantile'`) to produce a range: *"this patient is likely to gain between 10 and 22 points."* This is more honest and clinically useful than a single number that carries RMSE ≈ 8.
 
-### 5. Multi-Task Learning (joint regression + classification)
-Train a single model that simultaneously predicts:
-- `health_gain` (regression head)
-- `NO_Benefit` probability (classification head)
+### 5. ~~Multi-Task Learning (joint regression + classification)~~ ✓ Tried — No impact (notebook 3.6)
+A two-head PyTorch MLP jointly predicting `health_gain` (regression) and `NO_Benefit` (classification) was implemented and evaluated. Both heads were outperformed by their dedicated single-task baselines. RMSE: 8.191 (vs 8.019 baseline). PR-AUC: 0.343 (vs 0.355 baseline). The shared trunk did not transfer signal beneficially — tasks interfered rather than regularised each other.
 
-The shared representation may allow the two tasks to regularise each other and extract more signal from the same features.
-
-### 6. Ordinal Regression on Binned Health Gain
-Bin `health_gain` into clinically meaningful categories:
-- Worsened (< 0)
-- Minimal benefit (0–7)
-- Moderate benefit (7–15)
-- Strong benefit (> 15)
-
-Train an **ordinal classifier**. This may be easier to learn than exact regression and directly maps to clinical decision categories.
+### 6. ~~Ordinal Regression on Binned Health Gain~~ ✓ Tried — Significantly worse (notebook 3.7)
+CatBoost MultiClass across 4 clinical bins (Worsened / Minimal / Moderate / Strong) was implemented and evaluated. Derived RMSE: 9.866 (vs 8.019 baseline, **1.85 points worse**). R²: −0.020 (below a naïve mean predictor). The approach loses within-bin precision and is dominated by class imbalance. Useful only if the decision genuinely requires 4-category output rather than a continuous score.
 
 ### 7. External Validation Across Hospitals
 The current pipeline pools all providers. Training a **mixed-effects model** (or including provider as a random effect via LightGBM with provider embeddings) may capture hospital-level outcome variation that inflates residual variance when ignored.
@@ -207,4 +253,5 @@ The current pipeline pools all providers. Training a **mixed-effects model** (or
 
 > The NHS PROMs knee replacement dataset, using pre-operative questionnaire data alone, has an **irreducible prediction floor of approximately RMSE ≈ 8.0 OKS points and R² ≈ 0.30**.  
 > This is not a model failure — it is an honest reflection of what pre-operative self-reported data can and cannot tell us about surgical outcomes.  
+> Six distinct modelling strategies were exhausted: optimised regression (3.2), stacking ensembles (3.3), feature/target engineering (3.4), target reframing (3.5), multi-task learning (3.6), and ordinal classification (3.7). None broke the ceiling. In fact, ordinal regression (3.7) and multi-task MLP (3.6) both *worsened* results compared to the baseline.  
 > To meaningfully improve prediction, the path forward is **richer data (HES linkage, comorbidities, surgical variables)**, not more sophisticated modelling on the current feature set.
