@@ -1,0 +1,92 @@
+{
+  "stage_complete": {
+    "upload": true,
+    "explore": true,
+    "outliers": true,
+    "missing": true,
+    "features": true,
+    "preparation": true,
+    "modelling": false,
+    "comparison": false,
+    "explanation": false,
+    "conclusions": false
+  },
+  "last_stage": "modelling",
+  "notes": "Demo project bootstrapped from NHS PROMs experimental notebooks. Data sourced from England NHS 1 dataset (2016-17 to 2018-19). Target: 'health_gain' (regression).",
+  "raw_data_path": "1_raw.parquet",
+  "outlier_data_path": null,
+  "imputed_data_path": null,
+  "features_data_path": null,
+  "train_data_path": "manual_imputation_train.parquet",
+  "test_data_path": "manual_imputation_test.parquet",
+  "results_cache_path": null,
+  "best_model_path": null,
+  "pipeline_config_path": null,
+  "upload_cfg": {
+    "file_name": "1.1-Reduced.parquet",
+    "target_column": "health_gain",
+    "task_type": "regression",
+    "sentinel_values": [
+      "*",
+      " ",
+      "9",
+      "999"
+    ],
+    "csv_separator": ",",
+    "n_rows": 124844,
+    "n_cols": 82,
+    "derived_outcome_formula": "Hip Replacement Post-Op Q Score - Hip Replacement Pre-Op Q Score",
+    "derived_outcome_column": "health_gain"
+  },
+  "outlier_cfg": {
+    "method": "iqr_zscore",
+    "note": "Applied during notebook pre-processing (1.2-Outlier-Detection.ipynb)"
+  },
+  "missing_cfg": {
+    "column_specs": [],
+    "global_indicator_threshold": 0.1,
+    "note": "Imputation applied during notebook pre-processing"
+  },
+  "feature_cfg": {
+    "derived_features": [
+      {
+        "name": "comorbidity_burden",
+        "formula": "sum of comorbidity flags"
+      },
+      {
+        "name": "depression_pain_interaction",
+        "formula": "Depression * Pre-Op Q Discomfort"
+      },
+      {
+        "name": "depression_anxiety_interaction",
+        "formula": "Depression * Pre-Op Q Anxiety"
+      }
+    ]
+  },
+  "prep_cfg": {
+    "test_size": 0.3,
+    "random_state": 42,
+    "note": "Split from notebook 2.1-data-preparation-Manual.ipynb"
+  },
+  "train_cfg": {},
+  "datasets": [
+    {
+      "name": "Manual Imputation",
+      "slug": "manual_imputation",
+      "description": "Hand-crafted imputation from notebook 2.1",
+      "train_path": "manual_imputation_train.parquet",
+      "test_path": "manual_imputation_test.parquet",
+      "n_train": 68169,
+      "n_test": 33365,
+      "n_features": 49,
+      "created_at": "2026-05-08T22:23:29",
+      "notes": "Source: notebooks/Experiment/Hip/data/interim/2.1-train/test.parquet\nStrategy: manual, domain-guided imputation. Includes comorbidity_burden, depression interactions, disability_missing flag.",
+      "pipeline_method": "Manual imputation | 50 features"
+    }
+  ],
+  "active_dataset": "manual_imputation",
+  "best_model_name": null,
+  "metrics_summary": {},
+  "comparison_table": [],
+  "run_summary": {}
+}
