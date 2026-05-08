@@ -211,3 +211,4 @@ LalitaPersonalQuestion.md
 notebooks/Experiment/Knee/models/all_results_cache.joblib
 notebooks/Experiment/Knee/models/
 notebooks/Experiment/Knee/catboost_info/catboost_training.json
+notebooks/Experiment/Hip/models/3.3-all_results_cache.joblib
