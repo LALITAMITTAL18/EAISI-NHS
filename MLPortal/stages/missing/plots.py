@@ -39,8 +39,19 @@ def missingness_bar(summary_df: pd.DataFrame, threshold: float = 10.0) -> go.Fig
     from shared.viz import add_reference_line
     add_reference_line(fig, threshold, orientation="v", label=f"{threshold}% threshold")
     high = df[df["pct_missing"] > threshold]
-    if len(high):
-        annotate_message(fig, f"{len(high)} columns exceed {threshold}% missing")
+    subtitle = (
+        f"<i><span style='color:{PALETTE.highlight};font-size:12px'>"
+        f"{len(high)} columns exceed {threshold}% missing</span></i>"
+        if len(high) else ""
+    )
+    title_text = "<b>Missing data by column</b>"
+    if subtitle:
+        title_text += f"<br>{subtitle}"
+    fig.update_layout(
+        title=dict(text=title_text),
+        margin=dict(t=75 if subtitle else 60, r=90),
+        xaxis=dict(range=[0, df["pct_missing"].max() * 1.2]),
+    )
     return fig
 
 

@@ -180,16 +180,35 @@ train_cfg = TrainConfig(
 
 # ── Training ──────────────────────────────────────────────────────────────────
 if selected_names and st.button("🚀 Train selected models", type="primary"):
-    results_store = []
     progress = st.progress(0)
     status = st.empty()
-    history_container = st.container()
+    trial_status = st.empty()
 
-    def on_model_done(name: str) -> None:
-        done = len(results_store)
-        progress.progress(done / len(selected_names))
-        status.info(f"Completed: {name}")
+    _total_trials = train_cfg.optuna.n_trials
+    _total_models = len(selected_names)
 
+    def on_trial_done(study, trial) -> None:
+        """Called by Optuna after every trial — keeps the WebSocket alive."""
+        best = study.best_value if study.best_trial else None
+        best_str = f"  |  best so far: {best:.4f}" if best is not None else ""
+        trial_status.caption(
+            f"Trial {trial.number + 1}/{_total_trials}{best_str}"
+        )
+
+    def on_model_done(name: str, done: int, total: int) -> None:
+        """Called after each model finishes — advances the progress bar."""
+        progress.progress(done / total)
+        status.info(f"✅ Completed {done}/{total}: **{name}**")
+        trial_status.empty()
+        # Show which model is up next
+        if done < total:
+            next_name = selected_names[done]  # done is 1-based, so index=done
+            status.info(f"⏳ {done}/{total} done — training **{next_name}**…")
+
+    # Show immediately which model is starting first
+    status.info(f"⏳ 0/{_total_models} done — training **{selected_names[0]}**…")
+
+    vslug = selected_variant["slug"]
     with st.spinner("Training…"):
         results = train_all(
             selected_names=selected_names,
@@ -200,19 +219,21 @@ if selected_names and st.button("🚀 Train selected models", type="primary"):
             numeric_cols=numeric_cols,
             categorical_cols=categorical_cols,
             prep_config=prep_cfg,
-            progress_callback=lambda name: (results_store.append(name), on_model_done(name)),
+            progress_callback=on_trial_done,
+            model_done_callback=on_model_done,
             output_dir=project_models_dir(),
+            variant_slug=vslug,
         )
-
     progress.progress(1.0)
-    status.success("All models trained!")
+    status.success(f"✅ All {len(results)} models trained!")
 
-    # Persist — name cache files per variant so re-runs with different variants don't collide
+    # Individual model files already saved inside train_all (one per model as it completes).
+    # Save the results cache as plain dicts — avoids Pydantic class-identity pickling errors
+    # that occur when Streamlit re-executes the page script and reimports the class.
+    # Pipelines are NOT stored here; load_variant_results() restores them from individual files.
     out_dir = project_models_dir()
-    persist_results(results, out_dir)
-    vslug = selected_variant["slug"]
     cache_path = out_dir / f"{vslug}_results_cache.joblib"
-    save_joblib(results, cache_path)
+    save_joblib([r.model_dump(mode="python") for r in results], cache_path)
 
     # Config JSON for reproducibility
     cfg_path = out_dir / f"{vslug}_pipeline_config.json"

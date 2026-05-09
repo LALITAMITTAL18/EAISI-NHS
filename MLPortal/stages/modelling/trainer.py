@@ -111,6 +111,7 @@ def run_optuna(
     categorical_cols: list[str],
     prep_config: Any,
     init_params: dict[str, Any] | None = None,
+    trial_callback=None,
 ) -> TrainResult:
     """Run Optuna HPO for a single model and return a TrainResult."""
     cv = _get_cv(task, config.cv_folds, config.random_seed)
@@ -145,11 +146,13 @@ def run_optuna(
         if filtered:
             study.enqueue_trial(filtered)
 
+    _callbacks = [trial_callback] if trial_callback is not None else []
     study.optimize(
         objective,
         n_trials=config.n_trials,
         timeout=config.timeout_seconds,
         show_progress_bar=False,
+        callbacks=_callbacks,
     )
 
     best_params = {**spec.default_params, **study.best_params}
@@ -183,6 +186,7 @@ def train_single(
     numeric_cols: list[str],
     categorical_cols: list[str],
     prep_config: Any,
+    trial_callback=None,
 ) -> TrainResult:
     """Train a single model with Optuna HPO."""
     return run_optuna(
@@ -194,6 +198,7 @@ def train_single(
         numeric_cols=numeric_cols,
         categorical_cols=categorical_cols,
         prep_config=prep_config,
+        trial_callback=trial_callback,
     )
 
 
@@ -234,15 +239,29 @@ def train_all(
     categorical_cols: list[str],
     prep_config: Any,
     progress_callback=None,
+    model_done_callback=None,
     output_dir: Path | None = None,
+    variant_slug: str = "",
 ) -> list[TrainResult]:
-    """Train all selected models sequentially; call progress_callback(name) after each.
+    """Train all selected models sequentially.
+
+    *progress_callback* is an Optuna trial callback (called after every trial
+    with ``(study, trial)`` args — use to update live trial status).
+
+    *model_done_callback* is called with ``(name: str, index: int, total: int)``
+    after each model finishes — use to advance the progress bar.
 
     If *output_dir* is provided each model is persisted to disk immediately after
     it finishes so partial results survive if training is interrupted.
+
+    Files are named ``{variant_slug}__{model_name}.joblib`` so results from
+    different dataset variants are never overwritten by each other.  Only the
+    same (variant, model) combination overwrites itself on a re-run.
     """
+    prefix = f"{variant_slug}__" if variant_slug else ""
+    total = len(selected_names)
     results: list[TrainResult] = []
-    for name in selected_names:
+    for idx, name in enumerate(selected_names):
         spec = registry.get(name)
         result = train_single(
             spec=spec,
@@ -253,27 +272,35 @@ def train_all(
             numeric_cols=numeric_cols,
             categorical_cols=categorical_cols,
             prep_config=prep_config,
+            trial_callback=progress_callback,
         )
         results.append(result)
-        # Save immediately so the model is on disk even if later models fail
+        # Save immediately so the model is on disk even if later models fail.
+        # Key on variant+model so different variants never overwrite each other.
         if output_dir is not None and result.pipeline is not None:
-            path = output_dir / f"{result.model_name}.joblib"
+            path = output_dir / f"{prefix}{result.model_name}.joblib"
             save_joblib(result.pipeline, path)
             result.pipeline_path = str(path)
-        if progress_callback:
-            progress_callback(name)
+        if model_done_callback is not None:
+            model_done_callback(name, idx + 1, total)
     return results
 
 
 def persist_results(
     results: list[TrainResult],
     output_dir: Path,
+    variant_slug: str = "",
 ) -> dict[str, str]:
-    """Save each model's pipeline to disk; return {model_name: path}."""
+    """Save each model's pipeline to disk; return {model_name: path}.
+
+    Uses the same ``{variant_slug}__{model_name}.joblib`` naming as
+    ``train_all`` so the two functions stay consistent.
+    """
+    prefix = f"{variant_slug}__" if variant_slug else ""
     paths: dict[str, str] = {}
     for result in results:
         if result.pipeline is not None:
-            path = output_dir / f"{result.model_name}.joblib"
+            path = output_dir / f"{prefix}{result.model_name}.joblib"
             save_joblib(result.pipeline, path)
             result.pipeline_path = str(path)
             paths[result.model_name] = str(path)

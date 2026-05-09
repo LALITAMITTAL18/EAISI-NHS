@@ -53,7 +53,14 @@ def metric_comparison_bar(
         )
     )
     direction = "lowest" if lower_is_better else "highest"
-    annotate_message(fig, f"'{names[best_idx]}' has the {direction} {metric}")
+    subtitle = f"<i><span style='color:{PALETTE.highlight};font-size:12px'>'{names[best_idx]}' has the {direction} {metric}</span></i>"
+    fig.update_layout(
+        title=dict(
+            text=f"<b>Model comparison — {metric}</b><br>{subtitle}",
+        ),
+        margin=dict(t=75, r=90),
+        xaxis=dict(range=[0, max(values) * 1.18]),
+    )
     return fig
 
 

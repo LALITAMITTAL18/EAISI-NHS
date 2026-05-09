@@ -8,9 +8,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pandas as pd
 import streamlit as st
 
-from shared.io import load_joblib, load_parquet
+from shared.io import load_parquet
 from shared.nav import render_sidebar
-from shared.state import get_state, mark_stage_complete, project_datasets_dir, project_models_dir, update_state
+from shared.state import get_state, list_trained_variants, load_variant_results, mark_stage_complete, project_datasets_dir, project_models_dir, update_state
 from stages.comparison.evaluator import (
     bland_altman_stats,
     calibration_by_decile,
@@ -34,15 +34,38 @@ st.caption("Evaluate all trained models on the held-out test set and compare acr
 
 state = get_state()
 _BASE = Path(__file__).parent.parent
-task = state.upload_cfg.get("task_type", "regression")
-target = state.upload_cfg.get("target_column", "")
 
-if not state.results_cache_path:
-    st.warning("⚠️ Complete Stage 7 (Modelling) first.")
+# ── Variant selector ──────────────────────────────────────────────────────────
+trained_variants = list_trained_variants()
+if not trained_variants:
+    st.warning("⚠️ No trained model results found. Complete Stage 7 (Modelling) first.")
     st.stop()
 
-results = load_joblib(project_models_dir() / state.results_cache_path)
-test = load_parquet(project_datasets_dir() / state.test_data_path)
+variant_names = [v["name"] for v in trained_variants]
+# Default to the variant that matches the current active dataset, otherwise first
+_active_slug = state.active_dataset
+_default_idx = next((i for i, v in enumerate(trained_variants) if v["slug"] == _active_slug), 0)
+
+st.subheader("Select trained variant to compare")
+_sel_name = st.selectbox(
+    "Dataset variant",
+    options=variant_names,
+    index=_default_idx,
+    help="Each trained variant has its own saved results. Select which one to evaluate.",
+)
+_sel_variant = next(v for v in trained_variants if v["name"] == _sel_name)
+
+task = _sel_variant["task_type"]
+target = _sel_variant["target_column"]
+_cache_file = _sel_variant["cache_path"]
+_test_path = _sel_variant["test_path"]
+
+if not _test_path:
+    st.error("No test data path found for this variant.")
+    st.stop()
+
+results = load_variant_results(_sel_variant["slug"], project_models_dir(), _sel_variant["task_type"])
+test = load_parquet(project_datasets_dir() / _test_path)
 X_test = test.drop(columns=[target], errors="ignore")
 y_test = test[target]
 
@@ -53,9 +76,11 @@ outcome_thresh = (
     else None
 )
 
-# ── Evaluate ──────────────────────────────────────────────────────────────────
+# ── Evaluate selected variant ─────────────────────────────────────────────────
 with st.spinner("Evaluating models…"):
-    comparison = compare_models(results, X_test, y_test, task, outcome_thresh)
+    comparison = compare_models(
+        results, X_test, y_test, task, outcome_thresh, dataset=_sel_variant["name"]
+    )
 
 # Persist best model name
 best_name = comparison.best_model_name
@@ -74,8 +99,47 @@ st.success(
     f"({comparison.best_metric_name} = {comparison.best_metric_value:.4f})"
 )
 
-# ── Metric comparison ─────────────────────────────────────────────────────────
-st.subheader("Metric comparison")
+# ── Cross-variant full results table (all datasets × all models) ──────────────
+st.subheader("Full results — all datasets × all models")
+st.caption(
+    "Every variant that has been trained is evaluated here against its own test set. "
+    "Use the 'Dataset variant' selector above to focus the charts below on one variant."
+)
+
+all_rows: list[dict] = []
+with st.spinner("Loading results from all trained variants…"):
+    for _tv in trained_variants:
+        try:
+            _tv_results = load_variant_results(_tv["slug"], project_models_dir(), _tv["task_type"])
+            _tv_test_path = _tv["test_path"]
+            if not _tv_test_path:
+                continue
+            _tv_test = load_parquet(project_datasets_dir() / _tv_test_path)
+            _tv_target = _tv["target_column"]
+            _tv_task = _tv["task_type"]
+            if _tv_target not in _tv_test.columns:
+                continue
+            _tv_X = _tv_test.drop(columns=[_tv_target], errors="ignore")
+            _tv_y = _tv_test[_tv_target]
+            _tv_comp = compare_models(
+                _tv_results, _tv_X, _tv_y, _tv_task, dataset=_tv["name"]
+            )
+            all_rows.extend([r.model_dump() for r in _tv_comp.rows])
+        except Exception as _e:
+            st.warning(f"Could not load results for **{_tv['name']}**: {_e}")
+
+if all_rows:
+    all_df = pd.DataFrame(all_rows)
+    _front = [c for c in ["dataset", "model_name", "task"] if c in all_df.columns]
+    _rest = [c for c in all_df.columns if c not in _front]
+    all_df = all_df[_front + _rest].dropna(axis=1, how="all")
+    st.dataframe(all_df.set_index(["dataset", "model_name"]), use_container_width=True)
+else:
+    st.info("No cross-variant results available.")
+
+# ── Metric comparison (selected variant) ──────────────────────────────────────
+st.divider()
+st.subheader(f"Metric comparison — {_sel_variant['name']}")
 metric_options = {
     "regression": [("test_rmse", True), ("test_mae", True), ("test_r2", False)],
     "classification": [("f2", False), ("roc_auc", False), ("pr_auc", False), ("recall", False)],
@@ -84,12 +148,6 @@ metric_options = {
 for metric, lower_is_better in metric_options.get(task, []):
     fig = metric_comparison_bar(comparison, metric, lower_is_better)
     st.plotly_chart(fig, use_container_width=True)
-
-# ── Full comparison table ─────────────────────────────────────────────────────
-st.subheader("Full results table")
-comp_df = pd.DataFrame([r.model_dump() for r in comparison.rows])
-comp_df = comp_df.dropna(axis=1, how="all")
-st.dataframe(comp_df.set_index("model_name"), use_container_width=True)
 
 # ── Regression-specific ───────────────────────────────────────────────────────
 if task == "regression" and best_name:

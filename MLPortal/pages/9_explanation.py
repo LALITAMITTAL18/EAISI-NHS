@@ -10,7 +10,7 @@ import streamlit as st
 
 from shared.io import load_joblib, load_parquet
 from shared.nav import render_sidebar
-from shared.state import get_state, mark_stage_complete, project_datasets_dir, project_models_dir
+from shared.state import get_state, list_trained_variants, mark_stage_complete, project_datasets_dir, project_models_dir
 from stages.explanation.explainer import (
     compute_native_importance,
     compute_pdp,
@@ -29,14 +29,36 @@ st.caption("Understand why the model makes its predictions using SHAP, permutati
 
 state = get_state()
 _BASE = Path(__file__).parent.parent
-target = state.upload_cfg.get("target_column", "")
 
-if not state.results_cache_path:
-    st.warning("⚠️ Complete Stage 7 first.")
+# ── Variant selector ──────────────────────────────────────────────────────────
+trained_variants = list_trained_variants()
+if not trained_variants:
+    st.warning("⚠️ No trained model results found. Complete Stage 7 (Modelling) first.")
     st.stop()
 
-results = load_joblib(project_models_dir() / state.results_cache_path)
-test = load_parquet(project_datasets_dir() / state.test_data_path)
+variant_names = [v["name"] for v in trained_variants]
+_active_slug = state.active_dataset
+_default_idx = next((i for i, v in enumerate(trained_variants) if v["slug"] == _active_slug), 0)
+
+st.subheader("Select trained variant to explain")
+_sel_name = st.selectbox(
+    "Dataset variant",
+    options=variant_names,
+    index=_default_idx,
+    help="Each trained variant has its own saved results. Select which one to explain.",
+)
+_sel_variant = next(v for v in trained_variants if v["name"] == _sel_name)
+
+target = _sel_variant["target_column"]
+_cache_file = _sel_variant["cache_path"]
+_test_path = _sel_variant["test_path"]
+
+if not _test_path:
+    st.error("No test data path found for this variant.")
+    st.stop()
+
+results = load_joblib(project_models_dir() / _cache_file)
+test = load_parquet(project_datasets_dir() / _test_path)
 X_test = test.drop(columns=[target], errors="ignore")
 y_test = test[target]
 

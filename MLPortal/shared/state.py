@@ -285,6 +285,123 @@ def list_project_datasets() -> list[dict]:
     return state.datasets
 
 
+def list_trained_variants() -> list[dict]:
+    """Return metadata for every variant that has trained models on disk.
+
+    A variant is considered trained if it has either:
+    - a ``{slug}_results_cache.joblib`` file, OR
+    - at least one ``{slug}__{model_name}.joblib`` individual model file.
+
+    Each returned dict contains:
+      slug, name, cache_path (filename or ""), task_type, target_column, test_path
+    Values fall back to project-level upload_cfg when the variant has no overrides.
+    """
+    models_dir = project_models_dir()
+    if not models_dir.exists():
+        return []
+    state = get_state()
+    variant_map = {v["slug"]: v for v in state.datasets}
+    upload_cfg = state.upload_cfg
+    _cache_suffix = "_results_cache.joblib"
+
+    # Collect slugs from cache files
+    slugs_seen: dict[str, str] = {}  # slug -> cache_path filename (or "")
+    for cache_file in models_dir.glob(f"*{_cache_suffix}"):
+        slug = cache_file.name[: -len(_cache_suffix)]
+        slugs_seen[slug] = cache_file.name
+
+    # Also collect slugs from individual model files ({slug}__{model}.joblib)
+    for f in models_dir.glob("*__*.joblib"):
+        slug = f.name.split("__")[0]
+        if slug not in slugs_seen:
+            slugs_seen[slug] = ""  # no cache file, but individual models exist
+
+    trained: list[dict] = []
+    for slug in sorted(slugs_seen):
+        meta = variant_map.get(slug, {})
+        trained.append({
+            "slug": slug,
+            "name": meta.get("name", slug),
+            "cache_path": slugs_seen[slug],
+            "task_type": meta.get("task_type") or upload_cfg.get("task_type", "regression"),
+            "target_column": meta.get("target_column") or upload_cfg.get("target_column", ""),
+            "test_path": meta.get("test_path") or state.test_data_path,
+        })
+    return trained
+
+
+def load_variant_results(slug: str, models_dir: Path, variant_task: str = "regression") -> list:
+    """Load a variant's results cache and supplement with individual model files on disk.
+
+    The results cache only contains models from a single training run.  If the
+    user has trained different model subsets in separate runs, some models exist
+    only as individual ``{slug}__{model_name}.joblib`` files.  This function:
+
+    1. Loads the results cache (if it exists) to get ``TrainResult`` objects with
+       full HPO history and CV scores.
+    2. For any ``TrainResult`` whose ``pipeline`` is ``None`` (field is excluded
+       from Pydantic serialisation and may not survive pickling), loads the
+       pipeline from the matching individual file.
+    3. Adds a minimal ``TrainResult`` for every individual file whose model name
+       is NOT already in the cache.
+
+    Returns a list of ``TrainResult`` objects, all with ``pipeline`` set.
+    """
+    # Late import to avoid circular dependency at module load time.
+    from stages.modelling.models import TrainResult
+    from shared.io import load_joblib
+
+    cache_file = models_dir / f"{slug}_results_cache.joblib"
+    cached_raw = []
+    if cache_file.exists():
+        try:
+            cached_raw = load_joblib(cache_file)
+        except Exception:
+            # Corrupt or truncated cache (e.g. interrupted write) — fall back to
+            # individual model files below.  Remove the bad file so a fresh run
+            # can write a clean one.
+            try:
+                cache_file.unlink()
+            except OSError:
+                pass
+    # Support both old format (list[TrainResult] pickled objects) and new format (list[dict]).
+    # New format avoids Pydantic class-identity pickling errors on Streamlit reruns.
+    cached: list[TrainResult] = []
+    for item in cached_raw:
+        if isinstance(item, dict):
+            item.pop("pipeline", None)  # never stored, but guard against stale keys
+            try:
+                cached.append(TrainResult(**item))
+            except Exception:
+                pass
+        elif hasattr(item, "model_name"):
+            cached.append(item)  # old format: already a TrainResult
+    cached_map: dict[str, TrainResult] = {r.model_name: r for r in cached}
+
+    prefix = f"{slug}__"
+    for f in sorted(models_dir.glob(f"{prefix}*.joblib")):
+        model_name = f.name[len(prefix) : -len(".joblib")]
+        if model_name in cached_map:
+            # Restore pipeline if it was lost (exclude=True field)
+            if cached_map[model_name].pipeline is None:
+                cached_map[model_name].pipeline = load_joblib(f)
+        else:
+            # Model trained in a separate run — create a minimal TrainResult
+            pipeline = load_joblib(f)
+            cached_map[model_name] = TrainResult(
+                model_name=model_name,
+                task=variant_task,
+                best_params={},
+                optuna_history=[],
+                pipeline=pipeline,
+            )
+
+    # Return in consistent order: cached entries first, then extras alphabetically
+    cached_names = [r.model_name for r in cached]
+    extras = sorted(k for k in cached_map if k not in cached_names)
+    return [cached_map[n] for n in cached_names + extras]
+
+
 def register_dataset(
     name: str,
     train_path: str,

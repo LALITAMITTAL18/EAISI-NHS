@@ -328,6 +328,34 @@ method). Changing the selection calls `set_active_dataset()` which updates
 named `<variant_slug>_results_cache.joblib` so different variants never overwrite
 each other.
 
+**Per-variant task & target override:**
+After the variant's train data is loaded, Stage 7 renders a "Task & target for this
+variant" row with two side-by-side selectboxes. This allows classification and
+regression variants to coexist within the same project without requiring the user
+to edit the project-level upload config.
+
+- **Task type** — pre-populated from `selected_variant["task_type"]`; if absent,
+  falls back to the project-level `_project_task`. Auto-detection: if the chosen
+  target column has exactly 2 unique values and the resolved task is `regression`,
+  the task is silently promoted to `classification`.
+- **Target column** — pre-populated from `selected_variant["target_column"]`; falls
+  back to the project-level target. Rendered as a full selectbox of all columns in
+  the loaded train file so the user can override it freely.
+
+The resolved `task` and `target` variables flow into `registry.list_for_task(task)`,
+the metric options, the CV strategy (`StratifiedKFold` vs `KFold`), and `TrainConfig`.
+
+Dataset variants may carry `task_type` / `target_column` metadata fields to drive
+this behaviour automatically. Example (NHS Knee Replacement):
+
+| Variant slug | `task_type` | `target_column` |
+|---|---|---|
+| `cls_reduced` | `classification` | `NO_Benefit` |
+| `reg_reduced` | `regression` | `health_gain` |
+
+All other variants without these fields inherit the project-level defaults
+(`regression` / `health_gain`).
+
 **Model registry design:**
 - All models defined in `website/data/models.json` — no hardcoded Python dicts
 - Users add custom models via `website/data/custom_models.json`
@@ -368,14 +396,55 @@ re-runs Optuna. Warm-start hints are passed via `study.enqueue_trial()`.
 - Optuna trial history scatter; best trial highlighted
 - CV score bar across all trained models; best highlighted
 
-**Outputs:** `outputs/models/{ModelName}.joblib` per model, `results_cache.joblib`,
-`pipeline_config.json` (full config for reproducibility)
+**Training progress UI:**
+The "Train selected models" button triggers a live progress display with three
+independent update layers:
 
-**Incremental model persistence:** Each model's `.joblib` file is written to
-`outputs/<project>/models/` immediately after that model finishes training (not
-after all models complete). This means partial results survive if training is
-interrupted — already-trained models do not need to be re-run. The results cache
-and pipeline config JSON are still written once at the end of the full run.
+| Element | Updates when | Shows |
+|---|---|---|
+| `status` info bar | Button clicked (immediately) | Which model is starting first |
+| `trial_status` caption | After every Optuna trial (`on_trial_done`) | `Trial 7/50 | best so far: 0.7312` |
+| `progress` bar + `status` | After each model completes (`on_model_done`) | `✅ 2/5 done — training NextModel…` |
+
+`on_trial_done(study, trial)` is registered as an Optuna `callbacks` argument
+inside `run_optuna()`, so it fires between every trial of every model — keeping
+the browser WebSocket alive even during very long single-model runs.
+
+`on_model_done(name, done, total)` is a new `model_done_callback` parameter on
+`train_all()`, called immediately after each model's pipeline is saved to disk.
+
+**Known fix applied (progress bar):** `on_model_done` was previously defined
+inside the button handler but never passed to `train_all`, so the progress bar
+sat at 0 for the entire run. It is now correctly wired via `model_done_callback`.
+
+**Outputs:** `{variant_slug}__{model_name}.joblib` per model,
+`{variant_slug}_results_cache.joblib`, `{variant_slug}_pipeline_config.json`
+
+**Model file naming (variant × model isolation):** Individual pipeline files are
+keyed on both the dataset variant slug and the model name:
+
+```
+{variant_slug}__{model_name}.joblib
+```
+
+This means training `RandomForest` on `cls_reduced` and `reg_reduced` produces
+two separate files and neither ever overwrites the other. Only re-running the
+exact same (variant, model) combination overwrites the file. The results cache
+(used by Stage 8) is also keyed per variant: `{variant_slug}_results_cache.joblib`.
+
+**Incremental model persistence:** Each model's `.joblib` file is written
+immediately after that model finishes training inside `train_all()` — partial
+results survive if training is interrupted and already-trained models do not need
+to be re-run. The results cache and pipeline config JSON are written once at the
+end of the full run.
+
+**Long-running training support:** Training can run for hours without issue.
+- Streamlit has no built-in server timeout.
+- `n_jobs=-1` in `cross_val_score` parallelises across all CPU cores.
+- `.streamlit/config.toml` sets `enableWebsocketCompression = false` to prevent
+  proxies and firewalls from dropping the idle WebSocket connection.
+- The Optuna trial callback fires a UI update after every trial, ensuring the
+  browser connection stays active even when a single model takes a long time.
 
 ---
 
@@ -383,6 +452,24 @@ and pipeline config JSON are still written once at the end of the full run.
 
 **Purpose:** Evaluate all trained models on the held-out test set and compare
 across multiple metrics, calibration and equity dimensions.
+
+**Trained variant selector (new):**
+Stage 8 no longer relies on `state.results_cache_path` (which only reflects the
+last-run variant). Instead it calls `list_trained_variants()` which scans the
+`outputs/<project>/models/` directory for all `*_results_cache.joblib` files on
+disk and presents them in a selectbox. This means:
+- Every variant ever trained in this project is available for comparison at any time.
+- Switching variants loads the correct results cache, task type, target column and
+  test parquet for that variant — no manual state changes needed.
+- Defaults to whichever variant is currently active in the session, but the user
+  can freely switch to any other trained variant.
+
+**`list_trained_variants()` (`shared/state.py`):**
+- Scans `project_models_dir()` for `*_results_cache.joblib` files.
+- For each file, extracts the slug from the filename and looks up that slug in
+  `state.datasets` to recover `name`, `task_type`, `target_column`, and `test_path`.
+- Falls back to project-level `upload_cfg` values when a variant has no overrides.
+- Returns a list of dicts: `{slug, name, cache_path, task_type, target_column, test_path}`.
 
 **Metrics:**
 
@@ -392,7 +479,30 @@ across multiple metrics, calibration and equity dimensions.
 
 *Ordinal:* Exact accuracy, Adjacent accuracy (±1 bin), Ordinal MAE
 
-**Comparison views:**
+**Cross-variant full results table (new):**
+Stage 8 now shows a combined scorecard for **all** trained variants, not just the
+currently-selected one. This mirrors the `all_results` pattern used in the
+`4.1-Clinical-Model-Evaluation.ipynb` notebook.
+
+How it works:
+1. Iterates over every entry returned by `list_trained_variants()` (i.e. every
+   `*_results_cache.joblib` file on disk — including variants trained in previous
+   sessions).
+2. For each variant, loads its results cache and test parquet, then calls
+   `compare_models(..., dataset=variant_name)`.
+3. `compare_models()` now accepts a `dataset: str = "default"` parameter and stamps
+   every `MetricRow` it produces with that name via `row.model_copy(update={"dataset": dataset})`.
+4. All rows from all variants are collected into a single `pd.DataFrame` indexed by
+   `(dataset, model_name)`, with all-null metric columns dropped automatically.
+5. The table is displayed at the top of Stage 8, before the per-variant charts.
+
+Because the `dataset` tag is applied at evaluation time (not stored in the cache),
+this is fully backwards-compatible with model files saved in previous sessions.
+
+`MetricRow.dataset` field in `stages/comparison/models.py` already existed
+(defaulting to `"default"`); no schema migration is required.
+
+**Comparison views (selected variant):**
 - Per-metric horizontal bar chart; best model highlighted, all others gray
 - Bland-Altman limits of agreement (bias ± 1.96 SD) — regression
 - Calibration by decile (mean predicted vs mean actual; bubble size ∝ n) — regression
@@ -429,6 +539,13 @@ stored for downstream stages.
 
 **Purpose:** Understand feature importance and individual predictions using
 model-agnostic and model-specific explanation techniques.
+
+**Trained variant selector (new):**
+Same as Stage 8 — calls `list_trained_variants()` to show a selectbox of all
+variants with saved results. The selected variant drives which results cache,
+target column and test parquet are loaded. The model selector then lists all
+models within that variant's cache (defaulting to `state.best_model_name` if
+it exists in the chosen variant).
 
 **Techniques:**
 

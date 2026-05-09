@@ -109,6 +109,7 @@ def compare_models(
     y_test: pd.Series,
     task: str,
     outcome_threshold: float | None = None,
+    dataset: str = "default",
 ) -> ComparisonResult:
     """Evaluate all trained models on the held-out test set."""
     rows: list[MetricRow] = []
@@ -132,6 +133,7 @@ def compare_models(
                     pass
             row = evaluate_classification(y_test, y_pred, y_prob, result.model_name, task)
 
+        row = row.model_copy(update={"dataset": dataset})
         result.test_metrics = {k: v for k, v in row.model_dump().items() if v is not None}
         rows.append(row)
 

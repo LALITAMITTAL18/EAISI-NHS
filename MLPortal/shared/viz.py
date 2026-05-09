@@ -138,11 +138,15 @@ def annotate_message(
     fig: go.Figure,
     text: str,
     x: float = 0.0,
-    y: float = 1.05,
+    y: float = 1.08,
     color: str | None = None,
-    size: int = 13,
+    size: int = 12,
 ) -> go.Figure:
-    """Add a 'so-what' text annotation — the takeaway message on the chart."""
+    """Add a 'so-what' text annotation — the takeaway message on the chart.
+
+    The annotation is placed above the plot area (yref='paper').  The figure's
+    top margin is expanded automatically so it never overlaps chart content.
+    """
     fig.add_annotation(
         x=x,
         y=y,
@@ -153,6 +157,10 @@ def annotate_message(
         yref="paper",
         xanchor="left",
     )
+    # Ensure there is enough room above the plot for the annotation text.
+    current_margin = fig.layout.margin or {}
+    current_t = current_margin.t if hasattr(current_margin, "t") and current_margin.t else 60
+    fig.update_layout(margin=dict(t=max(int(current_t), 85)))
     return fig
 
 

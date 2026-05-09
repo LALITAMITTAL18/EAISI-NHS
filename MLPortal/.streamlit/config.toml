@@ -1,0 +1,9 @@
+[server]
+# Keep WebSocket alive during long training runs (seconds between pings)
+# Prevents proxies/firewalls from dropping idle connections
+maxUploadSize = 200
+enableWebsocketCompression = false
+
+[browser]
+# Prevent browser from going to sleep and dropping the connection
+gatherUsageStats = false
