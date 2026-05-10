@@ -1,0 +1,14 @@
+[
+  {
+    "name": "NHS Knee Replacement",
+    "slug": "nhs_knee_replacement",
+    "description": "NHS PROMs knee replacement outcomes (England, 2016-19). Predicts health_gain (post-op OKS minus pre-op OKS). 4 dataset variants pre-loaded.",
+    "created_at": "2026-05-08T22:23:29"
+  },
+  {
+    "name": "NHS Hip Replacement",
+    "slug": "nhs_hip_replacement",
+    "description": "NHS PROMs hip replacement outcomes (England, 2016-19). Predicts health_gain (post-op OHS minus pre-op OHS). 1 dataset variant(s) pre-loaded.",
+    "created_at": "2026-05-08T22:23:29"
+  }
+]
