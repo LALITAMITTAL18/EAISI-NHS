@@ -1,5 +1,0 @@
-﻿NAME,TYPE,LOCATION,RESOURCE LINK
-"af-sapbtp-devsc-01","Foundry","Sweden Central","https://portal.azure.com#resource/subscriptions/9c822b03-1ca9-42ec-ab7a-0bb18124325a/resourceGroups/rg-sapbtp-dev-sc-01/providers/Microsoft.CognitiveServices/accounts/af-sapbtp-devsc-01"
-"proj-default (af-sapbtp-devsc-01/proj-default)","Foundry project","Sweden Central","https://portal.azure.com#resource/subscriptions/9c822b03-1ca9-42ec-ab7a-0bb18124325a/resourceGroups/rg-sapbtp-dev-sc-01/providers/Microsoft.CognitiveServices/accounts/af-sapbtp-devsc-01/projects/proj-default"
-"srch-sapbtp-dev-sc-01","Search service","Sweden Central","https://portal.azure.com#resource/subscriptions/9c822b03-1ca9-42ec-ab7a-0bb18124325a/resourceGroups/rg-sapbtp-dev-sc-01/providers/Microsoft.Search/searchServices/srch-sapbtp-dev-sc-01"
-"stsapbtpdevsc01","Storage account","Sweden Central","https://portal.azure.com#resource/subscriptions/9c822b03-1ca9-42ec-ab7a-0bb18124325a/resourceGroups/rg-sapbtp-dev-sc-01/providers/Microsoft.Storage/storageAccounts/stsapbtpdevsc01"

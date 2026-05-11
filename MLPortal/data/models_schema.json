@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ML Pipeline Model Specification",
+  "description": "Schema for entries in models.json and custom_models.json",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["name", "display_name", "task", "constructor_path"],
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Unique identifier used in code and results (e.g. 'CatBoostRegressor')"
+      },
+      "display_name": {
+        "type": "string",
+        "description": "Human-readable label shown in the UI"
+      },
+      "task": {
+        "type": "array",
+        "description": "Which ML tasks this model supports",
+        "items": {
+          "type": "string",
+          "enum": ["regression", "classification", "ordinal"]
+        },
+        "minItems": 1
+      },
+      "constructor_path": {
+        "type": "string",
+        "description": "Fully-qualified Python import path (e.g. 'catboost.CatBoostRegressor')"
+      },
+      "default_params": {
+        "type": "object",
+        "description": "Default keyword arguments passed to the constructor",
+        "additionalProperties": true
+      },
+      "optuna_space": {
+        "type": "object",
+        "description": "Hyperparameter search space for Optuna. Keys are constructor argument names.",
+        "additionalProperties": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["int", "float", "categorical"],
+              "description": "Optuna suggestion type"
+            },
+            "low": {
+              "type": "number",
+              "description": "Lower bound (int/float only)"
+            },
+            "high": {
+              "type": "number",
+              "description": "Upper bound (int/float only)"
+            },
+            "log": {
+              "type": "boolean",
+              "description": "Use log scale (float only). Useful for learning_rate, alpha, C.",
+              "default": false
+            },
+            "step": {
+              "type": "integer",
+              "description": "Step size (int only)"
+            },
+            "choices": {
+              "type": "array",
+              "description": "List of allowed values (categorical only)"
+            }
+          }
+        }
+      },
+      "finetune_window": {
+        "type": "number",
+        "description": "Fraction (0-1) of the original search range to use for fine-tuning around the best found parameters",
+        "default": 0.2,
+        "minimum": 0.05,
+        "maximum": 1.0
+      },
+      "requires_scaling": {
+        "type": "boolean",
+        "description": "Whether this model requires feature scaling (StandardScaler applied if true)",
+        "default": false
+      },
+      "supports_warmstart": {
+        "type": "boolean",
+        "description": "Whether the model supports warm-starting from a pre-trained checkpoint",
+        "default": false
+      },
+      "tags": {
+        "type": "array",
+        "description": "Optional tags for filtering/grouping in the UI (e.g. 'linear', 'boosting', 'fast')",
+        "items": { "type": "string" }
+      }
+    }
+  }
+}
