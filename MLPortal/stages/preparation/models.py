@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from stages.preparation.cleaner import DerivedStep, NullHandlingRule
 
 
 class OutcomeThresholdConfig(BaseModel):
@@ -52,6 +54,8 @@ class PrepConfig(BaseModel):
     """Full data preparation and split configuration."""
 
     columns_to_drop: list[str] = Field(default_factory=list)
+    null_rules: dict[str, Any] = Field(default_factory=dict)   # col -> NullHandlingRule dict
+    derived_steps: list[Any] = Field(default_factory=list)      # list of DerivedStep dicts
     split: SplitConfig = Field(default_factory=SplitConfig)
     scaler: ScalerConfig = Field(default_factory=ScalerConfig)
     encoder: EncoderConfig = Field(default_factory=EncoderConfig)

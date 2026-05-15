@@ -43,48 +43,57 @@ if not variants:
     st.warning("⚠️ Complete Stage 6 (Preparation & Split) first to create a dataset variant.")
     st.stop()
 
-st.subheader("Dataset variant")
+st.subheader("Dataset variants")
 variant_names = [v["name"] for v in variants]
 active_slug = state.active_dataset
-active_idx = next((i for i, v in enumerate(variants) if v["slug"] == active_slug), 0)
+active_name = next((v["name"] for v in variants if v["slug"] == active_slug), variant_names[0])
 
-col_vs, col_vi = st.columns([2, 3])
-with col_vs:
-    selected_name = st.selectbox(
-        "Select dataset variant to use for training",
-        options=variant_names,
-        index=active_idx,
-    )
-selected_variant = next(v for v in variants if v["name"] == selected_name)
+selected_names_variants = st.multiselect(
+    "Select one or more dataset variants to train on",
+    options=variant_names,
+    default=[active_name],
+    help="Models will be trained independently on each selected variant.",
+)
 
-with col_vi:
-    st.caption(f"**Train:** {selected_variant.get('n_train', '?'):,} rows")
-    st.caption(f"**Test:** {selected_variant.get('n_test', '?'):,} rows")
-    st.caption(f"**Features:** {selected_variant.get('n_features', '?')}")
-    if selected_variant.get("pipeline_method"):
-        st.caption(f"**Method:** {selected_variant['pipeline_method']}")
+if not selected_names_variants:
+    st.warning("⚠️ Select at least one dataset variant.")
+    st.stop()
 
-# Switch active dataset if user changed the selector
-if selected_variant["slug"] != active_slug:
-    set_active_dataset(selected_variant["slug"])
+selected_variants = [v for v in variants if v["name"] in selected_names_variants]
+
+# Show info table for all selected variants
+info_cols = st.columns(len(selected_variants))
+for col, sv in zip(info_cols, selected_variants):
+    with col:
+        _n_tr = sv.get("n_train", "?")
+        _n_te = sv.get("n_test", "?")
+        st.caption(f"**{sv['name']}**")
+        st.caption(f"Train: {_n_tr:,} rows" if isinstance(_n_tr, int) else f"Train: {_n_tr} rows")
+        st.caption(f"Test: {_n_te:,} rows" if isinstance(_n_te, int) else f"Test: {_n_te} rows")
+        st.caption(f"Features: {sv.get('n_features', '?')}")
+        if sv.get("pipeline_method"):
+            st.caption(f"Method: {sv['pipeline_method']}")
+
+# Use the first selected variant as the reference for task/target config
+_ref_variant = selected_variants[0]
+if _ref_variant["slug"] != active_slug:
+    set_active_dataset(_ref_variant["slug"])
     state = get_state()
 
 if not state.train_data_path:
-    st.warning("⚠️ Selected variant has no data paths — re-create it in Stage 6.")
+    st.warning("⚠️ Reference variant has no data paths — re-create it in Stage 6.")
     st.stop()
 
-train = load_parquet(project_datasets_dir() / state.train_data_path)
-test = load_parquet(project_datasets_dir() / state.test_data_path)
+_ref_train = load_parquet(project_datasets_dir() / state.train_data_path)
 
-# ── Per-variant task & target override ───────────────────────────────────────
-_variant_target = selected_variant.get("target_column") or target
-_variant_task   = selected_variant.get("task_type")   or _project_task
+# ── Task & target (applies to all selected variants) ─────────────────────────
+_variant_target = _ref_variant.get("target_column") or target
+_variant_task   = _ref_variant.get("task_type")   or _project_task
 
-# Auto-detect: binary target with project task=regression -> likely classification
-if _variant_target in train.columns and train[_variant_target].nunique() == 2 and _variant_task == "regression":
+if _variant_target in _ref_train.columns and _ref_train[_variant_target].nunique() == 2 and _variant_task == "regression":
     _variant_task = "classification"
 
-st.subheader("Task & target for this variant")
+st.subheader("Task & target (applied to all selected variants)")
 col_task_a, col_task_b = st.columns(2)
 with col_task_a:
     _task_labels = ["regression", "classification", "ordinal"]
@@ -92,25 +101,22 @@ with col_task_a:
         "Task type",
         options=_task_labels,
         index=_task_labels.index(_variant_task) if _variant_task in _task_labels else 0,
-        help="Override the project-level task type for this variant.",
+        help="Applied to every selected variant.",
     )
 with col_task_b:
-    _all_cols = train.columns.tolist()
+    _all_cols = _ref_train.columns.tolist()
     _default_target_idx = _all_cols.index(_variant_target) if _variant_target in _all_cols else 0
     target = st.selectbox(
         "Target column",
         options=_all_cols,
         index=_default_target_idx,
-        help="Override the project-level target column for this variant.",
+        help="Applied to every selected variant.",
     )
 
-X_train = train.drop(columns=[target], errors="ignore")
-y_train = train[target]
-X_test = test.drop(columns=[target], errors="ignore")
-y_test = test[target]
-
-numeric_cols = X_train.select_dtypes(include="number").columns.tolist()
-categorical_cols = X_train.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
+# Reference columns used for model registry filtering
+_ref_X = _ref_train.drop(columns=[target], errors="ignore")
+numeric_cols = _ref_X.select_dtypes(include="number").columns.tolist()
+categorical_cols = _ref_X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
 
 # ── Model registry ────────────────────────────────────────────────────────────
 registry = load_registry(_BASE)
@@ -179,81 +185,105 @@ train_cfg = TrainConfig(
 )
 
 # ── Training ──────────────────────────────────────────────────────────────────
-if selected_names and st.button("🚀 Train selected models", type="primary"):
-    progress = st.progress(0)
-    status = st.empty()
-    trial_status = st.empty()
-
+_n_variants = len(selected_variants)
+_btn_label = (
+    f"🚀 Train selected models on {_n_variants} variant{'s' if _n_variants > 1 else ''}"
+)
+if selected_names and st.button(_btn_label, type="primary"):
+    out_dir = project_models_dir()
     _total_trials = train_cfg.optuna.n_trials
     _total_models = len(selected_names)
 
-    def on_trial_done(study, trial) -> None:
-        """Called by Optuna after every trial — keeps the WebSocket alive."""
-        best = study.best_value if study.best_trial else None
-        best_str = f"  |  best so far: {best:.4f}" if best is not None else ""
-        trial_status.caption(
-            f"Trial {trial.number + 1}/{_total_trials}{best_str}"
-        )
+    all_variant_results: dict[str, list] = {}  # slug → list[TrainResult]
 
-    def on_model_done(name: str, done: int, total: int) -> None:
-        """Called after each model finishes — advances the progress bar."""
-        progress.progress(done / total)
-        status.info(f"✅ Completed {done}/{total}: **{name}**")
-        trial_status.empty()
-        # Show which model is up next
-        if done < total:
-            next_name = selected_names[done]  # done is 1-based, so index=done
-            status.info(f"⏳ {done}/{total} done — training **{next_name}**…")
+    for _vi, _sv in enumerate(selected_variants):
+        vslug = _sv["slug"]
+        st.markdown(f"#### Variant {_vi + 1}/{_n_variants}: **{_sv['name']}**")
 
-    # Show immediately which model is starting first
-    status.info(f"⏳ 0/{_total_models} done — training **{selected_names[0]}**…")
+        # Resolve data paths from the variant metadata directly
+        _v_train_path = _sv.get("train_path") or _sv.get("train_data_path")
+        _v_test_path  = _sv.get("test_path")  or _sv.get("test_data_path")
 
-    vslug = selected_variant["slug"]
-    with st.spinner("Training…"):
-        results = train_all(
-            selected_names=selected_names,
-            registry=registry,
-            X_train=X_train,
-            y_train=y_train,
-            config=train_cfg,
-            numeric_cols=numeric_cols,
-            categorical_cols=categorical_cols,
-            prep_config=prep_cfg,
-            progress_callback=on_trial_done,
-            model_done_callback=on_model_done,
-            output_dir=project_models_dir(),
-            variant_slug=vslug,
-        )
-    progress.progress(1.0)
-    status.success(f"✅ All {len(results)} models trained!")
+        if not _v_train_path:
+            st.warning(f"⚠️ No data path for variant **{_sv['name']}** — skipping.")
+            continue
 
-    # Individual model files already saved inside train_all (one per model as it completes).
-    # Save the results cache as plain dicts — avoids Pydantic class-identity pickling errors
-    # that occur when Streamlit re-executes the page script and reimports the class.
-    # Pipelines are NOT stored here; load_variant_results() restores them from individual files.
-    out_dir = project_models_dir()
-    cache_path = out_dir / f"{vslug}_results_cache.joblib"
-    save_joblib([r.model_dump(mode="python") for r in results], cache_path)
+        _v_train = load_parquet(project_datasets_dir() / _v_train_path)
+        _v_X_train = _v_train.drop(columns=[target], errors="ignore")
+        _v_y_train = _v_train[target]
+        _v_num_cols = _v_X_train.select_dtypes(include="number").columns.tolist()
+        _v_cat_cols = _v_X_train.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
 
-    # Config JSON for reproducibility
-    cfg_path = out_dir / f"{vslug}_pipeline_config.json"
-    save_json(train_cfg.model_dump(mode="json"), cfg_path)
+        progress = st.progress(0)
+        status = st.empty()
+        trial_status = st.empty()
 
+        def on_trial_done(study, trial, _tt=_total_trials, _ts=trial_status) -> None:
+            best = study.best_value if study.best_trial else None
+            best_str = f"  |  best so far: {best:.4f}" if best is not None else ""
+            _ts.caption(f"Trial {trial.number + 1}/{_tt}{best_str}")
+
+        def on_model_done(name: str, done: int, total: int,
+                          _p=progress, _s=status, _ts=trial_status,
+                          _sn=selected_names) -> None:
+            _p.progress(done / total)
+            _s.info(f"✅ Completed {done}/{total}: **{name}**")
+            _ts.empty()
+            if done < total:
+                _s.info(f"⏳ {done}/{total} done — training **{_sn[done]}**…")
+
+        status.info(f"⏳ 0/{_total_models} done — training **{selected_names[0]}**…")
+
+        with st.spinner(f"Training on {_sv['name']}…"):
+            results = train_all(
+                selected_names=selected_names,
+                registry=registry,
+                X_train=_v_X_train,
+                y_train=_v_y_train,
+                config=train_cfg,
+                numeric_cols=_v_num_cols,
+                categorical_cols=_v_cat_cols,
+                prep_config=prep_cfg,
+                progress_callback=on_trial_done,
+                model_done_callback=on_model_done,
+                output_dir=out_dir,
+                variant_slug=vslug,
+            )
+        progress.progress(1.0)
+        status.success(f"✅ All {len(results)} models trained on **{_sv['name']}**!")
+        all_variant_results[vslug] = results
+
+        # Save results cache and config per variant
+        cache_path = out_dir / f"{vslug}_results_cache.joblib"
+        save_joblib([r.model_dump(mode="python") for r in results], cache_path)
+        cfg_path = out_dir / f"{vslug}_pipeline_config.json"
+        save_json(train_cfg.model_dump(mode="json"), cfg_path)
+
+    # Update state using the last-trained variant's paths (reference variant)
+    _last_slug = selected_variants[-1]["slug"]
     update_state({
-        "results_cache_path": cache_path.name,
-        "pipeline_config_path": cfg_path.name,
+        "results_cache_path": f"{_last_slug}_results_cache.joblib",
+        "pipeline_config_path": f"{_last_slug}_pipeline_config.json",
         "train_cfg": train_cfg.model_dump(mode="json"),
     })
     mark_stage_complete("modelling")
 
-    # Show CV summary
-    cv_scores = [r.cv_score for r in results if r.cv_score is not None]
-    model_names = [r.model_name for r in results if r.cv_score is not None]
-    st.plotly_chart(training_summary_bar(model_names, cv_scores, metric), use_container_width=True)
-
-    # Per-model Optuna history
-    for result in results:
-        with st.expander(f"Optuna history — {result.model_name}"):
-            st.plotly_chart(optuna_history_plot(result.optuna_history, result.model_name), use_container_width=True)
+    # ── Results summary per variant ───────────────────────────────────────────
+    for vslug, results in all_variant_results.items():
+        _sv_name = next((v["name"] for v in selected_variants if v["slug"] == vslug), vslug)
+        st.markdown(f"#### Results — {_sv_name}")
+        cv_scores = [r.cv_score for r in results if r.cv_score is not None]
+        model_names_res = [r.model_name for r in results if r.cv_score is not None]
+        if cv_scores:
+            st.plotly_chart(
+                training_summary_bar(model_names_res, cv_scores, metric),
+                use_container_width=True,
+            )
+        for result in results:
+            with st.expander(f"Optuna history — {result.model_name}"):
+                st.plotly_chart(
+                    optuna_history_plot(result.optuna_history, result.model_name),
+                    use_container_width=True,
+                )
 
     st.switch_page("pages/8_comparison.py")

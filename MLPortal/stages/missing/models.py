@@ -26,6 +26,10 @@ class MissingConfig(BaseModel):
 
     column_specs: list[ImputerSpec] = Field(default_factory=list)
     global_indicator_threshold: float = 0.02
+    sentinel_values: list[int | float | str] = Field(
+        default_factory=list,
+        description="Values treated as missing (e.g. 9 in NHS PROMs Likert columns).",
+    )
 
 
 class ImputationResult(BaseModel):

@@ -11,7 +11,7 @@ import streamlit as st
 from shared.io import load_parquet, save_parquet
 from shared.nav import render_sidebar
 from shared.state import get_state, mark_stage_complete, project_datasets_dir, update_state
-from stages.missing.analyser import add_missing_indicators, missingness_summary
+from stages.missing.analyser import add_missing_indicators, missingness_summary, replace_sentinels
 from stages.missing.models import ImputerSpec, MissingConfig
 from stages.missing.plots import co_missing_heatmap, missingness_bar
 
@@ -32,8 +32,35 @@ if not prev_path:
 df = load_parquet(project_datasets_dir() / prev_path)
 target = state.upload_cfg.get("target_column", df.columns[0])
 
+# ── Sentinel values ───────────────────────────────────────────────────────────
+st.subheader("Sentinel / coded missing values")
+st.caption(
+    "NHS PROMs uses **9** (and sometimes **99**) to encode *'unknown / not answered'* "
+    "in Likert-scale columns. These are stored as real integers, so pandas does not "
+    "detect them as missing. List any such sentinel values here — they will be treated "
+    "as NaN throughout this stage and in Stage 6 imputation."
+)
+sentinel_raw = st.text_input(
+    "Sentinel values (comma-separated integers/floats)",
+    value="9",
+    help="e.g. '9' or '9, 99, -1'",
+)
+sentinel_values: list[int | float] = []
+for tok in sentinel_raw.split(","):
+    tok = tok.strip()
+    if tok:
+        try:
+            sentinel_values.append(int(tok) if "." not in tok else float(tok))
+        except ValueError:
+            st.warning(f"Ignoring non-numeric sentinel value: '{tok}'")
+
+# Replace sentinels in the working copy used for analysis
+df_analysis = replace_sentinels(df, sentinel_values)
+
+st.divider()
+
 # ── Missingness overview ──────────────────────────────────────────────────────
-summary = missingness_summary(df)
+summary = missingness_summary(df_analysis)
 n_missing_cols = int((summary["n_missing"] > 0).sum())
 
 st.subheader("Missingness overview")
@@ -43,7 +70,7 @@ st.plotly_chart(missingness_bar(summary), use_container_width=True)
 # ── Co-missingness ────────────────────────────────────────────────────────────
 with st.expander("Co-missingness heatmap"):
     from stages.missing.analyser import co_missing_matrix
-    mat = co_missing_matrix(df)
+    mat = co_missing_matrix(df_analysis)
     st.plotly_chart(co_missing_heatmap(mat), use_container_width=True)
 
 # ── UMAP (optional) ──────────────────────────────────────────────────────────
@@ -54,7 +81,7 @@ with st.expander("Missingness pattern visualisation (UMAP — optional)"):
 
         if st.button("Compute UMAP (may take a moment)"):
             with st.spinner("Computing UMAP embedding…"):
-                umap_df = missingness_umap_data(df)
+                umap_df = missingness_umap_data(df_analysis)
             st.plotly_chart(umap_scatter(umap_df), use_container_width=True)
     except ImportError:
         st.info(
@@ -110,9 +137,11 @@ if submitted:
     config = MissingConfig(
         column_specs=col_specs,
         global_indicator_threshold=indicator_threshold / 100,
+        sentinel_values=sentinel_values,
     )
     out_path = project_datasets_dir() / "3_missing_cfg.parquet"
-    save_parquet(df, out_path)  # save current state with no imputation applied yet (done in Stage 6)
+    # Save the sentinel-replaced DataFrame so downstream stages see NaN
+    save_parquet(df_analysis, out_path)
     update_state({
         "imputed_data_path": out_path.name,
         "missing_cfg": config.model_dump(),

@@ -121,7 +121,7 @@ def build_regression_pipeline(
         y_train,
         cv=cv,
         scoring=scoring,
-        n_jobs=-1,
+        n_jobs=1,
         return_train_score=False,
     )
     cv_metrics = CVMetrics(

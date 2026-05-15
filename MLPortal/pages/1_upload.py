@@ -64,6 +64,27 @@ if uploaded is not None:
 
     st.success(f"Loaded **{df_raw.shape[0]:,} rows × {df_raw.shape[1]} columns**")
 
+    # ── Column overview with null detection ───────────────────────────────────
+    st.subheader("Column overview")
+    null_counts = df_raw.isnull().sum()
+    col_overview = pd.DataFrame({
+        "Column": df_raw.columns,
+        "Type": df_raw.dtypes.astype(str).values,
+        "Non-Null": (len(df_raw) - null_counts).values,
+        "Null Count": null_counts.values,
+        "Null %": (null_counts / len(df_raw) * 100).round(1).values,
+    })
+
+    def _highlight_nulls(row: pd.Series) -> list[str]:
+        color = "background-color: #fff3cd" if row["Null Count"] > 0 else ""
+        return [color] * len(row)
+
+    st.dataframe(
+        col_overview.style.apply(_highlight_nulls, axis=1),
+        use_container_width=True,
+        hide_index=True,
+    )
+
     # ── Sentinel configuration ────────────────────────────────────────────────
     st.subheader("Sentinel values")
     st.caption("These values will be replaced with NaN across all columns.")
@@ -75,6 +96,23 @@ if uploaded is not None:
 
     # Apply sentinels for preview purposes
     df_clean = apply_sentinels(df_raw, sentinel_values)
+
+    # Refresh column overview after sentinel replacement
+    null_counts_clean = df_clean.isnull().sum()
+    if null_counts_clean.sum() != null_counts.sum():
+        st.caption("**Column nulls after sentinel replacement:**")
+        col_overview_clean = pd.DataFrame({
+            "Column": df_clean.columns,
+            "Type": df_clean.dtypes.astype(str).values,
+            "Non-Null": (len(df_clean) - null_counts_clean).values,
+            "Null Count": null_counts_clean.values,
+            "Null %": (null_counts_clean / len(df_clean) * 100).round(1).values,
+        })
+        st.dataframe(
+            col_overview_clean.style.apply(_highlight_nulls, axis=1),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     # ── Outcome variable builder ──────────────────────────────────────────────
     st.subheader("Outcome variable")

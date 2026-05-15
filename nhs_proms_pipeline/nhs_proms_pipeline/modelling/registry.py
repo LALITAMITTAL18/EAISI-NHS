@@ -36,7 +36,7 @@ _BASE_MODELS: dict[str, BaseEstimator] = {
     "Ridge": Ridge(alpha=1.0, random_state=42),
     "Lasso": Lasso(alpha=0.01, random_state=42, max_iter=10_000),
     "RandomForest": RandomForestRegressor(
-        n_estimators=200, random_state=42, n_jobs=-1
+        n_estimators=200, random_state=42, n_jobs=1
     ),
     # HistGradientBoosting is ~10× faster than GradientBoostingRegressor
     "GradientBoosting": HistGradientBoostingRegressor(max_iter=300, random_state=42),
@@ -48,7 +48,7 @@ if _XGBOOST_AVAILABLE:
         learning_rate=0.05,
         subsample=0.8,
         random_state=42,
-        n_jobs=-1,
+        n_jobs=1,
         verbosity=0,
     )
 

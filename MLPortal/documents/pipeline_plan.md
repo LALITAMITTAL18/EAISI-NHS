@@ -84,6 +84,9 @@ Two modes:
 - Sentinel values (editable list)
 - CSV separator
 
+**Column overview (always visible after upload):**
+Once a file is loaded, a **Column Overview** table is always displayed below the success banner showing every column with its dtype, non-null count, null count, and null percentage. Columns with any nulls are highlighted in amber so the user immediately sees what needs attention before proceeding to later stages.
+
 **Outputs:** `1_raw.parquet`, updated `session_state.json`
 
 **Improvement suggestions:**
@@ -255,6 +258,15 @@ engineering and imputation fitted on train only.
 #### Route B — Upload pre-split files (bypass)
 The user uploads their own train and test files (CSV, Excel, Parquet, JSON).
 Stages 1–5 are skipped. On save, all prior stages are marked complete.
+
+#### Route C — Upload a single (unsplit) dataset
+The user uploads a single combined dataset (not yet split). After upload the user
+selects the target column and task type, then configures the same split, imputation,
+scaling and encoding options as Route A. The split is applied here in Stage 6 so
+the full leakage-free pipeline still runs. This is the recommended route when the
+user skipped Stage 1 (e.g. they already have a clean single-file dataset and want
+to experiment with different split strategies without re-running the full pipeline).
+All prior stages are marked complete on save.
 
 ### Already-prepared variant flow
 

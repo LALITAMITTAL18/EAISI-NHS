@@ -2,13 +2,46 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import pandas as pd
 
 
-def missingness_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a DataFrame with per-column missingness counts and percentages."""
+def replace_sentinels(
+    df: pd.DataFrame,
+    sentinel_values: Sequence[int | float | str] | None,
+) -> pd.DataFrame:
+    """Return a copy of *df* with sentinel values replaced by NaN.
+
+    Only numeric columns are checked for numeric sentinels; string/object
+    columns are checked for string sentinels.  This prevents accidental
+    replacement in free-text columns.
+    """
+    if not sentinel_values:
+        return df
+    df = df.copy()
+    num_sentinels = [v for v in sentinel_values if isinstance(v, (int, float))]
+    str_sentinels = [v for v in sentinel_values if isinstance(v, str)]
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]) and num_sentinels:
+            df[col] = df[col].replace(num_sentinels, pd.NA)
+        elif pd.api.types.is_object_dtype(df[col]) and str_sentinels:
+            df[col] = df[col].replace(str_sentinels, pd.NA)
+    return df
+
+
+def missingness_summary(
+    df: pd.DataFrame,
+    sentinel_values: Sequence[int | float | str] | None = None,
+) -> pd.DataFrame:
+    """Return a DataFrame with per-column missingness counts and percentages.
+
+    If *sentinel_values* is provided, those values are treated as missing
+    before computing counts (e.g. ``9`` in NHS PROMs Likert columns).
+    """
     n = len(df)
-    counts = df.isna().sum()
+    df_check = replace_sentinels(df, sentinel_values)
+    counts = df_check.isna().sum()
     return pd.DataFrame(
         {
             "column": counts.index,
