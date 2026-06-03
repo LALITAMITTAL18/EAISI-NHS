@@ -6,14 +6,10 @@ dependencies:
   - python=3.10
   - pip:
     - azureml-inference-server-http
-    # Pipeline was serialised with sklearn 1.8.0 — must match to avoid InconsistentVersionWarning
-    - scikit-learn==1.8.0
-    - pandas>=2.1.0
-    - numpy>=1.26.0
-    - joblib>=1.3.0
-    - shap>=0.45.0
-    - xgboost>=2.0.0
-    - lightgbm>=4.3.0
-    - catboost>=1.2.0
-    - interpret>=0.6.0
-    - category-encoders>=2.6.0
+    # numpy >= 2.0 required: pipeline pickled with numpy 2.x (uses numpy._core)
+    - "numpy>=2.0.0"
+    # sklearn 1.7.x is the highest version supporting Python 3.10
+    # Pipeline was saved with 1.8.0 but 1.7.x loads it with a version warning only
+    - "scikit-learn>=1.7.2,<1.8"
+    - "pandas>=2.1.0"
+    - "joblib>=1.3.0"

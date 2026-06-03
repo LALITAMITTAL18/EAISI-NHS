@@ -225,51 +225,103 @@ def _endpoint_panel(
     base_image: str,
     label: str,
 ) -> bool:
-    """Render endpoint create/deploy UI. Returns True when endpoint is Succeeded."""
+    """Render endpoint create/deploy UI. Returns True only when endpoint is
+    Succeeded AND has at least one active deployment with traffic."""
     info = get_endpoint_info(client, endpoint_name)
     _endpoint_status_badge(info)
 
+    # ── Endpoint does not exist yet ───────────────────────────────────────────
     if info is None:
         st.markdown(
-            "Create a **Managed Online Endpoint** in the Azure ML workspace, "
-            "then deploy the registered model to it."
+            "No endpoint found. Click below to create the endpoint **and** deploy "
+            "the selected model in one step (~10–15 minutes)."
         )
         if model_ref is None:
-            st.error("Select a registered model above before creating the endpoint.")
+            st.error("Select a registered model above first.")
             return False
-
         if st.button(f"🚀 Create & Deploy {label} Endpoint", key=f"create_{endpoint_name}"):
-            with st.spinner(
-                "Creating endpoint… (this takes ~10 minutes, please wait)"
-            ):
+            with st.spinner("Creating endpoint… (~2 min)"):
                 try:
                     create_endpoint(client, endpoint_name, f"NHS Knee {label} endpoint")
-                    st.info("Endpoint created. Deploying model…")
-                    deploy_model(
-                        client,
-                        endpoint_name,
-                        deployment_name,
-                        model_ref,
-                        scoring_dir,
-                        conda_file,
-                        instance_type,
-                        base_image=base_image,
-                    )
-                    st.success("Deployment complete! Refresh the page to continue.")
-                    st.rerun()
                 except Exception as exc:
                     st.error(f"Endpoint creation failed: {exc}")
+                    return False
+            with st.spinner("Deploying model… (~10–15 min, please wait)"):
+                try:
+                    deploy_model(
+                        client, endpoint_name, deployment_name, model_ref,
+                        scoring_dir, conda_file, instance_type, base_image=base_image,
+                    )
+                    st.success("Deployment complete!")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Deployment failed: {exc}")
         return False
 
+    # ── Endpoint is still provisioning ────────────────────────────────────────
     if info.provisioning_state in ("Creating", "Updating"):
         st.button("🔄 Refresh status", key=f"refresh_{endpoint_name}", on_click=st.rerun)
         return False
 
+    # ── Endpoint failed ───────────────────────────────────────────────────────
     if info.provisioning_state == "Failed":
         st.error("Endpoint is in a failed state. Check the Azure ML portal for details.")
         return False
 
-    return info.provisioning_state == "Succeeded"
+    # ── Endpoint exists but NO deployment yet (your current state) ────────────
+    has_deployments = bool(info.deployment_names)
+    has_traffic = bool(info.traffic)
+
+    if info.provisioning_state == "Succeeded" and not has_deployments:
+        st.warning(
+            "⚠️ Endpoint created successfully but **no model is deployed yet**. "
+            "This happens when the deployment step was interrupted or timed out. "
+            "Click below to deploy the model to the existing endpoint."
+        )
+        if model_ref is None:
+            st.error("Select a registered model above first.")
+            return False
+        if st.button(f"📦 Deploy Model to Existing Endpoint", key=f"deploy_only_{endpoint_name}",
+                     type="primary"):
+            with st.spinner("Deploying model to existing endpoint… (~10–15 min)"):
+                try:
+                    deploy_model(
+                        client, endpoint_name, deployment_name, model_ref,
+                        scoring_dir, conda_file, instance_type, base_image=base_image,
+                    )
+                    st.success("Deployment complete! Refresh to continue.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Deployment failed: {exc}")
+                    st.caption(
+                        "Tip: check Azure ML Studio → Endpoints → "
+                        f"`{endpoint_name}` → Logs for details."
+                    )
+        return False
+
+    # ── Endpoint succeeded with deployment but no traffic routed yet ──────────
+    if has_deployments and not has_traffic:
+        st.warning(
+            f"Deployment `{info.deployment_names[0]}` exists but has **0% traffic**. "
+            "Routing traffic now…"
+        )
+        try:
+            from azure.ai.ml.entities import ManagedOnlineEndpoint as _MOE
+            ep = client.online_endpoints.get(name=endpoint_name)
+            ep.traffic = {info.deployment_names[0]: 100}
+            client.online_endpoints.begin_create_or_update(ep).result()
+            st.success("Traffic routed to 100%. Refreshing…")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Traffic update failed: {exc}")
+        return False
+
+    # ── Fully ready ───────────────────────────────────────────────────────────
+    if has_deployments:
+        st.success(
+            f"✅ Ready — deployment `{info.deployment_names[0]}` serving 100% traffic"
+        )
+    return info.provisioning_state == "Succeeded" and has_deployments
 
 
 # ── RF model section ──────────────────────────────────────────────────────────

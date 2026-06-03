@@ -1,0 +1,8 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineEndpoint.schema.json
+name: nhs-knee-dl-endpoint
+auth_mode: key
+description: NHS Knee EfficientNet-B4 — KL grade classification (0-4) from X-ray images
+tags:
+  project: EAISI-NHS
+  model: efficientnet_b4
+  task: kl_grade_classification

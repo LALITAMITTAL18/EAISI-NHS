@@ -47,22 +47,43 @@ def init():
     if checkpoint_path is None:
         raise FileNotFoundError(f"No .pth checkpoint found under {model_dir}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Support two save formats:
+    #   1. Full dict: {'model_state_dict': ..., 'num_classes': ..., 'img_size': ..., ...}
+    #      (saved by knee_kl_efficientnet_b4_final.pth training code)
+    #   2. Bare state dict: torch.save(model.state_dict(), path)
+    #      (saved by best_efficientnet_b4.pth training code)
+    raw = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    num_classes = checkpoint.get("num_classes", 5)
-    img_size = checkpoint.get("img_size", 224)
-    class_names = checkpoint.get(
-        "class_names", [f"Grade {i}" for i in range(num_classes)]
-    )
+    if isinstance(raw, dict) and "model_state_dict" in raw:
+        state_dict = raw["model_state_dict"]
+        num_classes = raw.get("num_classes", 5)
+        img_size = raw.get("img_size", 380)
+        class_names = raw.get("class_names", [f"Grade {i}" for i in range(num_classes)])
+        backbone_name = raw.get("architecture", "efficientnet_b4")
+    else:
+        # Bare state dict — best_efficientnet_b4.pth format
+        state_dict = raw
+        num_classes = 5
+        img_size = 380  # EfficientNet-B4 training default
+        class_names = [f"Grade {i}" for i in range(num_classes)]
+        backbone_name = "efficientnet_b4"
 
     from torchvision import models as tv_models
 
-    backbone_name = checkpoint.get("architecture", "efficientnet_b4")
     backbone_fn = getattr(tv_models, backbone_name, tv_models.efficientnet_b4)
     net = backbone_fn(weights=None)
-    in_features = net.classifier[-1].in_features
-    net.classifier[-1] = torch.nn.Linear(in_features, num_classes)
-    net.load_state_dict(checkpoint["model_state_dict"])
+    # Custom head matching the training build_model() architecture:
+    #   Dropout(0.1) → Linear(1792→512) → BN1d(512) → ReLU → Dropout(0.05) → Linear(512→num_classes)
+    in_features = net.classifier[1].in_features  # 1792 for EfficientNet-B4
+    net.classifier = torch.nn.Sequential(
+        torch.nn.Dropout(p=0.1),
+        torch.nn.Linear(in_features, 512),
+        torch.nn.BatchNorm1d(512),
+        torch.nn.ReLU(),
+        torch.nn.Dropout(p=0.05),
+        torch.nn.Linear(512, num_classes),
+    )
+    net.load_state_dict(state_dict)
     net.to(device).eval()
 
     model = net

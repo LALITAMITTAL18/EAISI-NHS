@@ -25,10 +25,10 @@ DL_DEPLOYMENT_NAME = "dl-v1"
 # ── Recommended instance types ────────────────────────────────────────────────
 # RF model: CPU is sufficient for sklearn inference (cheap)
 RF_INSTANCE_TYPE = "Standard_DS3_v2"
-# DL model: GPU strongly recommended for EfficientNet-B4 (fast inference)
-#   GPU option  : "Standard_NC6s_v3"  or  "Standard_NV6ads_A10_v5"  (NVIDIA A10)
-#   CPU fallback: "Standard_DS3_v2"  (slower but no GPU quota needed)
-DL_INSTANCE_TYPE = "Standard_NV6ads_A10_v5"
+# DL model: CPU (Standard_E2s_v3, ESv3 family, quota=100) — GPU quota unavailable
+#   score.py falls back to CPU automatically via torch.device("cuda" if ... else "cpu")
+#   To use GPU later: swap to "Standard_NV6ads_A10_v5" and DL_BASE_IMAGE to the cuda image
+DL_INSTANCE_TYPE = "Standard_E2s_v3"
 
 # ── Official prebuilt inference images (Microsoft Container Registry) ─────────
 # Source: https://learn.microsoft.com/azure/machine-learning/concept-prebuilt-docker-images-inference
@@ -36,16 +36,12 @@ DL_INSTANCE_TYPE = "Standard_NV6ads_A10_v5"
 # RF  — CPU-only, scikit-learn:
 #   ⚠️  Pipeline serialised with sklearn 1.8.0 — DO NOT use the AzureML-sklearn-1.5 curated env
 #   Use the minimal base image + custom conda.yaml that pins scikit-learn==1.8.0
-#   Minimal base image: mcr.microsoft.com/azureml/minimal-py312-inference:latest
 #
-# DL  — GPU, PyTorch / EfficientNet-B4:
-#   Curated env (Studio name): acpt-pytorch-2.2-cuda12.1
-#   SDK/CLI name             : AzureML-acpt-pytorch-2.2-cuda12.1:1
-#   Prebuilt GPU image       : mcr.microsoft.com/azureml/minimal-ubuntu22.04-py39-cuda11.8-gpu-inference:latest
-#
-# In Studio: Environments → Curated environments → Filter → Tags: Inferencing
+# DL  — CPU, PyTorch / EfficientNet-B4 (deployed 2026-06-03):
+#   Using CPU image because GPU quota (Standard_NV6ads_A10_v5) = 0/0 on this subscription
+#   To switch to GPU: "mcr.microsoft.com/azureml/minimal-ubuntu22.04-py39-cuda11.8-gpu-inference:latest"
 RF_BASE_IMAGE = "mcr.microsoft.com/azureml/minimal-py312-inference:latest"
-DL_BASE_IMAGE = "mcr.microsoft.com/azureml/minimal-ubuntu22.04-py39-cuda11.8-gpu-inference:latest"
+DL_BASE_IMAGE = "mcr.microsoft.com/azureml/minimal-py312-inference:latest"
 
 
 def get_ml_client(config: AzureMLConfig):

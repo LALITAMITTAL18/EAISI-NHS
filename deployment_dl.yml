@@ -1,0 +1,30 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
+name: dl-v1
+endpoint_name: nhs-knee-dl-endpoint
+model: azureml:Knee-X-Ray-Prediction:1
+code_configuration:
+  code: MLPortal/stages/clinical_insight/scoring/dl
+  scoring_script: score.py
+environment:
+  image: mcr.microsoft.com/azureml/minimal-py312-inference:latest
+  conda_file: MLPortal/stages/clinical_insight/scoring/dl/conda.yaml
+  name: nhs-knee-dl-inference-env
+# CPU — ESv3 family has quota=100 vs DSv2 family quota=6 (exhausted by RF endpoint)
+# Standard_E2s_v3: 2 vCPU, 16 GB RAM — sufficient for EfficientNet-B4 CPU inference
+# Swap to Standard_NV6ads_A10_v5 + cuda11.8-gpu image if GPU quota is granted later
+instance_type: Standard_E2s_v3
+instance_count: 1
+# Torch + EfficientNet-B4 take ~3-4 min to install + load on first start.
+# liveness_probe.initial_delay gives the container that time before probes fire.
+liveness_probe:
+  initial_delay: 600
+  period: 30
+  timeout: 10
+  success_threshold: 1
+  failure_threshold: 10
+readiness_probe:
+  initial_delay: 600
+  period: 30
+  timeout: 10
+  success_threshold: 1
+  failure_threshold: 10
