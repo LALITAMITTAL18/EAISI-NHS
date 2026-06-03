@@ -2,13 +2,13 @@
   "task": "regression",
   "target_column": "health_gain",
   "selected_models": [
-    "HistGradientBoostingRegressor",
-    "CatBoostRegressor",
-    "LGBMRegressor"
+    "RandomForestRegressor",
+    "XGBRegressor",
+    "ExplainableBoostingRegressor"
   ],
   "optuna": {
     "n_trials": 40,
-    "cv_folds": 5,
+    "cv_folds": 3,
     "timeout_seconds": null,
     "metric": "neg_root_mean_squared_error",
     "sampler": "tpe",

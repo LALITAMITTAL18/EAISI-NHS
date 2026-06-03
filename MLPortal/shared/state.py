@@ -272,6 +272,12 @@ def project_reports_dir() -> Path:
     return _active_base_dir() / "reports"
 
 
+def project_comparison_dir() -> Path:
+    d = _active_base_dir() / "comparison"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 # ── Dataset variant helpers ───────────────────────────────────────────────────
 
 
@@ -316,16 +322,28 @@ def list_trained_variants() -> list[dict]:
         if slug not in slugs_seen:
             slugs_seen[slug] = ""  # no cache file, but individual models exist
 
+    datasets_dir = _active_base_dir() / "datasets"
+
     trained: list[dict] = []
     for slug in sorted(slugs_seen):
         meta = variant_map.get(slug, {})
+        # Prefer stored test_path; fall back to the conventional filename derived
+        # from the slug before resorting to the global state.test_data_path.
+        # This prevents a variant from accidentally using another variant's test
+        # set when its metadata entry is missing or the slug doesn't match exactly.
+        _inferred = f"{slug}_test.parquet"
+        test_path = (
+            meta.get("test_path")
+            or (_inferred if (datasets_dir / _inferred).exists() else None)
+            or state.test_data_path
+        )
         trained.append({
             "slug": slug,
             "name": meta.get("name", slug),
             "cache_path": slugs_seen[slug],
             "task_type": meta.get("task_type") or upload_cfg.get("task_type", "regression"),
             "target_column": meta.get("target_column") or upload_cfg.get("target_column", ""),
-            "test_path": meta.get("test_path") or state.test_data_path,
+            "test_path": test_path,
         })
     return trained
 

@@ -1,0 +1,267 @@
+"""Azure Machine Learning integration — endpoint management and inference."""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+from stages.clinical_insight.models import AzureMLConfig, EndpointInfo, WorkspaceModel
+
+# ── Fixed workspace parameters ────────────────────────────────────────────────
+# Subscription ID for "Visual Studio Enterprise" — set via env var or edit here
+DEFAULT_SUBSCRIPTION_ID = os.environ.get("AZURE_SUBSCRIPTION_ID", "")
+DEFAULT_RESOURCE_GROUP = "LMMachineLeanrning"
+DEFAULT_WORKSPACE_NAME = "NHSMLWorkspace"
+DEFAULT_TENANT_ID = "17b35a1d-057c-4ac5-a15a-08758f7a7064"
+
+RF_ENDPOINT_NAME = "nhs-knee-rf-endpoint"
+DL_ENDPOINT_NAME = "nhs-knee-dl-endpoint"
+RF_DEPLOYMENT_NAME = "rf-v1"
+DL_DEPLOYMENT_NAME = "dl-v1"
+
+# ── Recommended instance types ────────────────────────────────────────────────
+# RF model: CPU is sufficient for sklearn inference (cheap)
+RF_INSTANCE_TYPE = "Standard_DS3_v2"
+# DL model: GPU strongly recommended for EfficientNet-B4 (fast inference)
+#   GPU option  : "Standard_NC6s_v3"  or  "Standard_NV6ads_A10_v5"  (NVIDIA A10)
+#   CPU fallback: "Standard_DS3_v2"  (slower but no GPU quota needed)
+DL_INSTANCE_TYPE = "Standard_NV6ads_A10_v5"
+
+# ── Official prebuilt inference images (Microsoft Container Registry) ─────────
+# Source: https://learn.microsoft.com/azure/machine-learning/concept-prebuilt-docker-images-inference
+#
+# RF  — CPU-only, scikit-learn:
+#   ⚠️  Pipeline serialised with sklearn 1.8.0 — DO NOT use the AzureML-sklearn-1.5 curated env
+#   Use the minimal base image + custom conda.yaml that pins scikit-learn==1.8.0
+#   Minimal base image: mcr.microsoft.com/azureml/minimal-py312-inference:latest
+#
+# DL  — GPU, PyTorch / EfficientNet-B4:
+#   Curated env (Studio name): acpt-pytorch-2.2-cuda12.1
+#   SDK/CLI name             : AzureML-acpt-pytorch-2.2-cuda12.1:1
+#   Prebuilt GPU image       : mcr.microsoft.com/azureml/minimal-ubuntu22.04-py39-cuda11.8-gpu-inference:latest
+#
+# In Studio: Environments → Curated environments → Filter → Tags: Inferencing
+RF_BASE_IMAGE = "mcr.microsoft.com/azureml/minimal-py312-inference:latest"
+DL_BASE_IMAGE = "mcr.microsoft.com/azureml/minimal-ubuntu22.04-py39-cuda11.8-gpu-inference:latest"
+
+
+def get_ml_client(config: AzureMLConfig):
+    """Create an MLClient.
+
+    Credential chain (tries in order):
+      1. AzureCliCredential  — works after `az login` (most common dev flow)
+      2. DefaultAzureCredential — picks up managed identity, env vars, VS Code, etc.
+    tenant_id is passed via AZURE_TENANT_ID env var, which both credential types honour.
+    """
+    try:
+        from azure.ai.ml import MLClient
+        from azure.identity import AzureCliCredential, ChainedTokenCredential, DefaultAzureCredential
+    except ImportError as exc:
+        raise ImportError(
+            "Install azure SDK: pip install azure-ai-ml azure-identity"
+        ) from exc
+
+    # Set tenant in env so every credential in the chain respects it
+    os.environ.setdefault("AZURE_TENANT_ID", config.tenant_id)
+
+    try:
+        # Prefer AzureCliCredential — works immediately after `az login`
+        credential = ChainedTokenCredential(
+            AzureCliCredential(tenant_id=config.tenant_id),
+            DefaultAzureCredential(exclude_shared_token_cache_credential=True),
+        )
+    except Exception:
+        credential = DefaultAzureCredential(exclude_shared_token_cache_credential=True)
+
+    return MLClient(
+        credential=credential,
+        subscription_id=config.subscription_id,
+        resource_group_name=config.resource_group,
+        workspace_name=config.workspace_name,
+    )
+
+
+def list_workspace_models(client) -> list[WorkspaceModel]:
+    """Return all registered models in the workspace."""
+    models = []
+    try:
+        for m in client.models.list():
+            models.append(
+                WorkspaceModel(
+                    name=m.name,
+                    version=str(m.version),
+                    description=m.description or "",
+                    tags=dict(m.tags or {}),
+                    type=str(getattr(m, "type", "")),
+                )
+            )
+    except Exception:
+        pass
+    return models
+
+
+def get_endpoint_info(client, endpoint_name: str) -> EndpointInfo | None:
+    """Return endpoint metadata, or None if it does not exist."""
+    try:
+        ep = client.online_endpoints.get(name=endpoint_name)
+        deployments = []
+        try:
+            for d in client.online_deployments.list(endpoint_name=endpoint_name):
+                deployments.append(d.name)
+        except Exception:
+            pass
+        return EndpointInfo(
+            name=ep.name,
+            scoring_uri=ep.scoring_uri,
+            provisioning_state=str(ep.provisioning_state or "Unknown"),
+            traffic=dict(ep.traffic or {}),
+            deployment_names=deployments,
+        )
+    except Exception:
+        return None
+
+
+def create_endpoint(client, endpoint_name: str, description: str) -> None:
+    """Start async creation of a managed online endpoint."""
+    from azure.ai.ml.entities import ManagedOnlineEndpoint
+
+    endpoint = ManagedOnlineEndpoint(
+        name=endpoint_name,
+        description=description,
+        auth_mode="key",
+        tags={"project": "nhs-knee-replacement", "stage": "clinical-insight"},
+    )
+    client.online_endpoints.begin_create_or_update(endpoint).result()
+
+
+def deploy_model(
+    client,
+    endpoint_name: str,
+    deployment_name: str,
+    model_ref: str,
+    scoring_dir: Path,
+    conda_file: str,
+    instance_type: str = "Standard_DS3_v2",
+    base_image: str | None = None,
+) -> None:
+    """Deploy a registered model to an existing endpoint.
+
+    base_image: MCR inference image to use as the Docker base.
+      RF (sklearn CPU) → RF_BASE_IMAGE  = mcr.microsoft.com/azureml/minimal-py312-inference:latest
+      DL (PyTorch GPU) → DL_BASE_IMAGE  = mcr.microsoft.com/azureml/minimal-ubuntu22.04-py39-cuda11.8-gpu-inference:latest
+      Alternatively reference a curated env: "azureml://registries/azureml/environments/AzureML-sklearn-1.5-ubuntu22.04-py39-cpu/versions/1"
+    """
+    from azure.ai.ml.entities import (
+        CodeConfiguration,
+        Environment,
+        ManagedOnlineDeployment,
+    )
+
+    resolved_image = base_image or RF_BASE_IMAGE
+    env = Environment(
+        image=resolved_image,
+        conda_file=str(scoring_dir / conda_file),
+        name=f"{endpoint_name}-env",
+        description=f"Inference environment for {endpoint_name}",
+    )
+
+    deployment = ManagedOnlineDeployment(
+        name=deployment_name,
+        endpoint_name=endpoint_name,
+        model=model_ref,
+        environment=env,
+        code_configuration=CodeConfiguration(
+            code=str(scoring_dir),
+            scoring_script="score.py",
+        ),
+        instance_type=instance_type,
+        instance_count=1,
+    )
+    client.online_deployments.begin_create_or_update(deployment).result()
+
+    # Route 100% traffic to the new deployment
+    ep = client.online_endpoints.get(name=endpoint_name)
+    ep.traffic = {deployment_name: 100}
+    client.online_endpoints.begin_create_or_update(ep).result()
+
+
+def register_model(
+    client,
+    model_name: str,
+    local_path: str,
+    description: str = "",
+    tags: dict | None = None,
+) -> str:
+    """Register a local model file in the workspace. Returns 'name:version'."""
+    from azure.ai.ml.constants import AssetTypes
+    from azure.ai.ml.entities import Model
+
+    model = Model(
+        path=local_path,
+        type=AssetTypes.CUSTOM_MODEL,
+        name=model_name,
+        description=description,
+        tags=tags or {},
+    )
+    registered = client.models.create_or_update(model)
+    return f"azureml:{registered.name}:{registered.version}"
+
+
+def invoke_tabular_endpoint(
+    client,
+    endpoint_name: str,
+    features: dict[str, Any],
+    compute_shap: bool = True,
+) -> dict[str, Any]:
+    """Call the RF tabular endpoint and return prediction + optional SHAP values."""
+    payload = json.dumps({"features": features, "compute_shap": compute_shap})
+    response = client.online_endpoints.invoke(
+        endpoint_name=endpoint_name,
+        request_file=None,
+        deployment_name=None,
+    )
+    # Use direct HTTP invocation since request_file approach needs a file
+    return _invoke_via_http(client, endpoint_name, payload)
+
+
+def invoke_xray_endpoint(
+    client,
+    endpoint_name: str,
+    image_bytes: bytes,
+) -> dict[str, Any]:
+    """Call the DL X-ray endpoint. Image is sent as base64-encoded JSON."""
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    payload = json.dumps({"image_base64": b64})
+    return _invoke_via_http(client, endpoint_name, payload)
+
+
+def _invoke_via_http(client, endpoint_name: str, payload: str) -> dict[str, Any]:
+    """Invoke endpoint over HTTP using the scoring URI + API key."""
+    import urllib.request
+
+    ep = client.online_endpoints.get(name=endpoint_name)
+    scoring_uri = ep.scoring_uri
+
+    keys = client.online_endpoints.get_keys(name=endpoint_name)
+    api_key = keys.primary_key
+
+    req = urllib.request.Request(
+        scoring_uri,
+        data=payload.encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+    return result
+
+
+def get_endpoint_keys(client, endpoint_name: str) -> tuple[str, str]:
+    """Return (primary_key, secondary_key) for an endpoint."""
+    keys = client.online_endpoints.get_keys(name=endpoint_name)
+    return keys.primary_key, getattr(keys, "secondary_key", "")

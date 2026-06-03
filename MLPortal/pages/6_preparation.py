@@ -500,37 +500,414 @@ if not prev_path:
 
 df = load_parquet(project_datasets_dir() / prev_path)
 
-# ── Split configuration ───────────────────────────────────────────────────────
-st.subheader("Train / test split")
-split_method = st.radio("Split method", ["random", "time"], horizontal=True)
+all_cols = [c for c in df.columns if c != target]
+null_counts_ser = df[all_cols].isnull().sum()
+cols_with_nulls = null_counts_ser[null_counts_ser > 0].index.tolist()
 
-sc = st.columns(3)
-with sc[0]:
-    test_size = st.slider("Test set size", 0.1, 0.4, 0.2, 0.05)
-with sc[1]:
-    seed = st.number_input("Random seed", value=42, step=1)
-with sc[2]:
-    stratify = st.checkbox(
-        "Stratify split",
-        value=True,
-        help=(
-            "For regression targets, the target is binned into quantiles and used for "
-            "stratification so train and test have equal target distributions."
-        ),
+# Session-state null rules: {col: {"strategy":..., "constant_value":..., "python_expr":...}}
+if "_prep_null_rules" not in st.session_state:
+    st.session_state._prep_null_rules = {}
+
+# ── Two-column layout: config (left) | preview (right) ──────────────────────
+cfg_col, preview_col = st.columns([1, 1], gap="large")
+
+# ─── RIGHT — Dataset Preview ─────────────────────────────────────────────────
+with preview_col:
+    st.subheader("Dataset Preview")
+    total_nulls = int(df[all_cols].isnull().sum().sum())
+    _m1, _m2, _m3, _m4 = st.columns(4)
+    _m1.metric("Rows", f"{len(df):,}")
+    _m2.metric("Features", str(len(all_cols)))
+    _m3.metric("Missing cells", f"{total_nulls:,}")
+    _m4.metric("Cols w/ missing", str(len(cols_with_nulls)))
+
+    show_missing_only = st.toggle(
+        "Only columns with missing values",
+        value=bool(cols_with_nulls),
+        key="preview_missing_toggle",
     )
+    _preview_show = cols_with_nulls if show_missing_only and cols_with_nulls else all_cols
+    _display_cols = [c for c in _preview_show if c in df.columns]
+    if target in df.columns and target not in _display_cols:
+        _display_cols = _display_cols + [target]
 
-stratify_bins = 5
-if stratify and task == "regression":
-    stratify_bins = st.slider(
-        "Stratification bins (quantile bins on target)",
-        min_value=2, max_value=20, value=5,
-        help="The target column is divided into this many equal-frequency bins before stratification.",
+    def _style_null(val: object) -> str:
+        return "background-color: #fff3cd; color: #856404;" if pd.isna(val) else ""
+
+    st.dataframe(
+        df[_display_cols].head(200).style.map(_style_null),
+        use_container_width=True,
+        height=420,
     )
+    if total_nulls:
+        st.caption("Amber cells = missing value")
 
-time_col = cutoff = None
-if split_method == "time":
-    time_col = st.selectbox("Time column", df.columns.tolist())
-    cutoff = st.text_input("Cutoff date (YYYY-MM-DD or year)")
+    if cols_with_nulls:
+        st.markdown("**Missing value summary**")
+        _configured_preview = st.session_state._prep_null_rules
+        st.dataframe(
+            pd.DataFrame({
+                "Column": cols_with_nulls,
+                "Type": [str(df[c].dtype) for c in cols_with_nulls],
+                "Missing": [int(null_counts_ser[c]) for c in cols_with_nulls],
+                "Missing %": [
+                    f"{null_counts_ser[c] / len(df) * 100:.1f}%"
+                    for c in cols_with_nulls
+                ],
+                "Rule": [
+                    _configured_preview.get(c, {}).get("strategy", "—")
+                    for c in cols_with_nulls
+                ],
+            }),
+            hide_index=True,
+            use_container_width=True,
+            height=250,
+        )
+
+# ─── LEFT — Configuration ────────────────────────────────────────────────────
+with cfg_col:
+
+    # ── Step 1 — Remove Columns ───────────────────────────────────────────────
+    with st.expander("Step 1 — Remove Columns", expanded=True):
+        _dc1, _dc2 = st.columns([2, 1])
+        with _dc1:
+            col_pattern = st.text_input(
+                "Filter by name…",
+                placeholder="e.g. Post-Op, Predicted",
+                key="col_drop_filter",
+            )
+        with _dc2:
+            dtype_filter = st.selectbox(
+                "Type",
+                ["All", "Numeric", "Categorical"],
+                key="col_drop_dtype",
+            )
+        _filtered_drop = all_cols
+        if col_pattern:
+            _filtered_drop = [c for c in _filtered_drop if col_pattern.lower() in c.lower()]
+        if dtype_filter == "Numeric":
+            _filtered_drop = [c for c in _filtered_drop if pd.api.types.is_numeric_dtype(df[c])]
+        elif dtype_filter == "Categorical":
+            _filtered_drop = [c for c in _filtered_drop if not pd.api.types.is_numeric_dtype(df[c])]
+
+        cols_to_drop = st.multiselect(
+            "Columns to drop",
+            _filtered_drop,
+            default=[],
+            key="cols_to_drop_select",
+            help="Removed before any other operation runs.",
+        )
+        if cols_to_drop:
+            st.info(
+                f"Will drop **{len(cols_to_drop)}** column(s): "
+                + ", ".join(cols_to_drop[:5])
+                + ("…" if len(cols_to_drop) > 5 else "")
+            )
+
+    remaining_feature_cols = [c for c in all_cols if c not in cols_to_drop]
+    active_null_cols = [c for c in cols_with_nulls if c not in cols_to_drop]
+
+    # ── Step 2 — Handle Missing Values (action-first UI) ─────────────────────
+    _null_label = f"Step 2 — Handle Missing Values  ({len(active_null_cols)} columns have nulls)"
+    with st.expander(_null_label, expanded=bool(active_null_cols)):
+
+        _STRAT_LABELS = {
+            "none": "Leave as-is",
+            "listwise_delete": "Delete rows (before split)",
+            "mean": "Fill — Mean (numeric, train-fitted)",
+            "median": "Fill — Median (numeric, train-fitted)",
+            "mode": "Fill — Mode / most frequent (train-fitted)",
+            "constant": "Fill — Constant value",
+            "python_expr": "Fill — Python expression (per-row, before split)",
+        }
+        _STRAT_DESC = {
+            "none": "No action — values remain. Handled by the global fallback below if configured.",
+            "listwise_delete": "Drops entire rows where this column is null. Runs **before** the train/test split.",
+            "mean": "Fills nulls with the training-set mean. Best for symmetric numeric distributions.",
+            "median": "Fills nulls with the training-set median. Robust to outliers; ideal for skewed numeric data.",
+            "mode": "Fills with the most frequent value from training. Works for numeric and categorical columns.",
+            "constant": "Fills nulls with a fixed value you supply (e.g. `0`, `Unknown`, `9` for NHS sentinel values).",
+            "python_expr": "Fills via a per-row Python expression using `row` dict, e.g. `row['a'] + row['b']`. Before split.",
+        }
+
+        if active_null_cols:
+            _num_null = [c for c in active_null_cols if pd.api.types.is_numeric_dtype(df[c])]
+
+            st.markdown("**Select action → select columns → Apply.**")
+
+            action = st.radio(
+                "Action:",
+                list(_STRAT_LABELS.keys()),
+                format_func=lambda k: _STRAT_LABELS[k],
+                key="mv_action",
+            )
+            st.caption(f"*{_STRAT_DESC[action]}*")
+
+            _eligible = _num_null if action in ("mean", "median") else active_null_cols
+            _elig_note = (
+                f"{len(_eligible)} numeric column(s) with missing values"
+                if action in ("mean", "median")
+                else f"{len(_eligible)} column(s) with missing values"
+            )
+
+            _cv_input = ""
+            _ex_input = ""
+            if action == "constant":
+                _cv_input = st.text_input(
+                    "Constant fill value:",
+                    key="mv_const",
+                    placeholder="e.g. 0, Unknown, 9",
+                )
+            elif action == "python_expr":
+                _ex_input = st.text_input(
+                    "Expression (`row` dict):",
+                    key="mv_expr",
+                    placeholder="row['col_a'] + row['col_b']",
+                )
+
+            if _eligible:
+                _ca, _cb = st.columns([3, 1])
+                with _ca:
+                    _selected_for_action = st.multiselect(
+                        f"Columns ({_elig_note}):",
+                        _eligible,
+                        key="mv_selected_cols",
+                    )
+                with _cb:
+                    st.write("")
+                    _apply_all_btn = st.button(
+                        "All eligible",
+                        key="mv_apply_all",
+                        use_container_width=True,
+                    )
+
+                _apply_btn = st.button(
+                    "Apply to selected →",
+                    key="mv_apply",
+                    type="primary",
+                    disabled=not _selected_for_action,
+                )
+
+                if _apply_btn or _apply_all_btn:
+                    _target_cols = _selected_for_action if _apply_btn else _eligible
+                    for _col in _target_cols:
+                        st.session_state._prep_null_rules[_col] = {
+                            "strategy": action,
+                            "constant_value": _cv_input,
+                            "python_expr": _ex_input,
+                        }
+                    st.rerun()
+            elif action in ("mean", "median"):
+                st.warning("No numeric columns with missing values available for this action.")
+
+            st.divider()
+
+            # Current rules summary
+            _set_rules = {
+                c: r
+                for c, r in st.session_state._prep_null_rules.items()
+                if c in active_null_cols and r.get("strategy", "none") != "none"
+            }
+            _unset = [
+                c for c in active_null_cols
+                if c not in st.session_state._prep_null_rules
+                or st.session_state._prep_null_rules[c].get("strategy", "none") == "none"
+            ]
+
+            if _set_rules:
+                st.markdown("**Applied rules:**")
+                st.dataframe(
+                    pd.DataFrame([
+                        {
+                            "Column": _c,
+                            "Missing": int(null_counts_ser[_c]),
+                            "Strategy": _STRAT_LABELS.get(_r["strategy"], _r["strategy"]),
+                            "Value": _r.get("constant_value") or _r.get("python_expr") or "—",
+                        }
+                        for _c, _r in _set_rules.items()
+                    ]),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                if st.button("Reset all rules", key="mv_reset"):
+                    st.session_state._prep_null_rules = {}
+                    st.rerun()
+
+            if _unset:
+                st.caption(
+                    f"**{len(_unset)} column(s) without a rule** → covered by global fallback: "
+                    + ", ".join(_unset[:6])
+                    + ("…" if len(_unset) > 6 else "")
+                )
+        else:
+            st.info("No columns with missing values (or all are being dropped).")
+
+        st.markdown("**Global fallback** for any remaining nulls:")
+        imputation_fallback = st.radio(
+            "Fallback strategy:",
+            [
+                "Use config from Stage 4",
+                "Median / mode",
+                "MICE (IterativeImputer, slow)",
+                "Drop rows with any missing",
+            ],
+            help="Applied after per-column rules above. Fitted on training data only.",
+            key="mv_fallback",
+        )
+
+    # ── Step 3 — Derived Columns ──────────────────────────────────────────────
+    with st.expander("Step 3 — Derived Columns & Custom Python Code", expanded=False):
+        st.caption(
+            "Add custom Python steps to compute or transform columns. "
+            "Code runs with `df`, `pd`, and `np` in scope. "
+            "Drop helper columns after each step."
+        )
+        st.markdown(
+            "**Example:**\n"
+            "```python\n"
+            "df['health_gain'] = df['Post-Op Score'] - df['Pre-Op Score']\n"
+            "```"
+        )
+        n_steps = st.number_input("Number of steps", 0, 10, 0, 1, key="n_derived_steps")
+        derived_steps: list[DerivedStep] = []
+        for _i in range(int(n_steps)):
+            st.markdown(f"---\n**Step {_i + 1}**")
+            _sn, _sw = st.columns([3, 1])
+            with _sn:
+                _step_name = st.text_input(
+                    "Step name", key=f"ds_name_{_i}", placeholder="e.g. Compute health_gain"
+                )
+            with _sw:
+                _when = st.selectbox(
+                    "When",
+                    ["before_split", "after_split"],
+                    key=f"ds_when_{_i}",
+                    help="before_split: on full dataset; after_split: on train & test separately",
+                )
+            _step_code = st.text_area(
+                "Python code (`df` is the DataFrame)",
+                key=f"ds_code_{_i}",
+                height=100,
+                placeholder="df['health_gain'] = df['Post-Op Score'] - df['Pre-Op Score']",
+            )
+            _step_drop = st.multiselect(
+                "Drop columns after this step",
+                df.columns.tolist(),
+                key=f"ds_drop_{_i}",
+                help="Columns to remove once the step has run.",
+            )
+            derived_steps.append(
+                DerivedStep(
+                    name=_step_name or f"Step {_i + 1}",
+                    code=_step_code,
+                    drop_after=_step_drop,
+                    apply_when=_when,
+                )
+            )
+
+    # ── Outcome threshold ─────────────────────────────────────────────────────
+    with st.expander("Outcome Threshold (optional)", expanded=False):
+        use_thresh = st.checkbox("Enable outcome threshold", key="ot_enable")
+        otc = OutcomeThresholdConfig()
+        if use_thresh:
+            _o1, _o2, _o3 = st.columns(3)
+            with _o1:
+                thresh_val = st.number_input("Threshold value", value=0.0, key="ot_thresh")
+            with _o2:
+                _ot_direction = st.selectbox("Direction", ["above", "below"], key="ot_dir")
+            with _o3:
+                _ot_pos = st.text_input("Positive label", "Positive", key="ot_pos")
+            _ot_neg = st.text_input("Negative label", "Negative", key="ot_neg")
+            _ot_col = st.text_input("Derived column name", "outcome_label", key="ot_col")
+            otc = OutcomeThresholdConfig(
+                enabled=True,
+                threshold=thresh_val,
+                direction=_ot_direction,
+                positive_label=_ot_pos,
+                negative_label=_ot_neg,
+                derived_column_name=_ot_col,
+            )
+
+    # ── Step 4 — Row-filter Variants ──────────────────────────────────────────
+    with st.expander("Step 4 — Row-filter Variants", expanded=False):
+        st.caption(
+            "Generate multiple named variants by excluding rows with specific values. "
+            "Each filter produces a separate train/test pair."
+        )
+        _filter_opts = [c for c in remaining_feature_cols if c not in cols_to_drop]
+        fv_col = st.selectbox(
+            "Column to filter on",
+            ["— none —"] + _filter_opts,
+            key="fv_col",
+            help="Typically an age band or grouping column whose extreme values you want to exclude.",
+        )
+        row_filter_variants: list[dict] = []
+        if fv_col and fv_col != "— none —":
+            _unique_vals = sorted(df[fv_col].dropna().unique().tolist())
+            st.caption(f"Unique values: {_unique_vals}")
+            _fp1, _fp2, _fp3, _fp4 = st.columns(4)
+            with _fp1:
+                add_lowest = st.checkbox("Exclude lowest", key="fv_lowest")
+            with _fp2:
+                add_highest = st.checkbox("Exclude highest", key="fv_highest")
+            with _fp3:
+                add_both = st.checkbox("Exclude both extremes", key="fv_both")
+            with _fp4:
+                add_custom = st.checkbox("Custom exclusion", key="fv_custom")
+            if _unique_vals:
+                _lv = _unique_vals[0]
+                _hv = _unique_vals[-1]
+                _slug_col = fv_col.lower().replace(" ", "-")[:15]
+                if add_lowest:
+                    row_filter_variants.append({"label": f"no-lowest-{_slug_col}", "col": fv_col, "exclude": [_lv]})
+                if add_highest:
+                    row_filter_variants.append({"label": f"no-highest-{_slug_col}", "col": fv_col, "exclude": [_hv]})
+                if add_both:
+                    row_filter_variants.append({"label": f"no-extreme-{_slug_col}", "col": fv_col, "exclude": [_lv, _hv]})
+                if add_custom:
+                    _custom_excl = st.multiselect("Values to exclude", _unique_vals, key="fv_custom_vals")
+                    _custom_label = st.text_input("Label suffix", "custom-filter", key="fv_custom_label")
+                    if _custom_excl:
+                        row_filter_variants.append({
+                            "label": re.sub(r"[^a-z0-9_-]", "-", _custom_label.lower())[:30],
+                            "col": fv_col,
+                            "exclude": _custom_excl,
+                        })
+            if row_filter_variants:
+                st.info(
+                    f"Will create **{len(row_filter_variants) + 1}** variant(s): "
+                    f"1 base + {', '.join(v['label'] for v in row_filter_variants)}"
+                )
+
+    # ── Split, Scaling & Encoding ─────────────────────────────────────────────
+    with st.expander("Split, Scaling & Encoding", expanded=True):
+        split_method = st.radio("Split method", ["random", "time"], horizontal=True, key="split_method")
+        _sc_cols = st.columns(3)
+        with _sc_cols[0]:
+            test_size = st.slider("Test set size", 0.1, 0.4, 0.2, 0.05, key="test_size_slider")
+        with _sc_cols[1]:
+            seed = st.number_input("Random seed", value=42, step=1, key="rand_seed")
+        with _sc_cols[2]:
+            stratify = st.checkbox(
+                "Stratify split",
+                value=True,
+                help="For regression targets, the target is binned into quantiles before stratification.",
+                key="stratify_ck",
+            )
+        stratify_bins = 5
+        if stratify and task == "regression":
+            stratify_bins = st.slider("Stratification bins", 2, 20, 5, key="strat_bins")
+        time_col = cutoff = None
+        if split_method == "time":
+            time_col = st.selectbox("Time column", df.columns.tolist(), key="time_col_sel")
+            cutoff = st.text_input("Cutoff date (YYYY-MM-DD or year)", key="time_cutoff")
+        _sc2, _enc2 = st.columns(2)
+        with _sc2:
+            scaler_method = st.selectbox(
+                "Scaler", ["standard", "minmax", "robust", "quantile", "none"], key="scaler_method"
+            )
+        with _enc2:
+            enc_method = st.selectbox("Categorical encoder", ["onehot", "ordinal"], key="enc_method")
 
 split_cfg = SplitConfig(
     method=split_method,
@@ -541,353 +918,26 @@ split_cfg = SplitConfig(
     time_cutoff=cutoff,
 )
 
-# ── Scaling & encoding ────────────────────────────────────────────────────────
-st.subheader("Scaling & encoding")
-col_sc, col_enc = st.columns(2)
-with col_sc:
-    scaler_method = st.selectbox("Scaler", ["standard", "minmax", "robust", "quantile", "none"])
-with col_enc:
-    enc_method = st.selectbox("Categorical encoder", ["onehot", "ordinal"])
-
-# ── Imputation strategy (affects variant identity) ────────────────────────────
-st.subheader("Imputation strategy")
-imputation_choice = st.radio(
-    "Missing value strategy",
-    ["Use config from Stage 4", "Median / mode (override)", "MICE (IterativeImputer, slow)", "Drop rows with any missing"],
-    help="Each strategy creates a distinct data variant.",
-)
-
-# ── Data Cleaning Pipeline ────────────────────────────────────────────────────
-st.subheader("Data Cleaning Pipeline")
-st.caption(
-    "Configure column removal, missing-value handling, and custom derived-column "
-    "steps. Operations marked **Before split** run on the full dataset; "
-    "**After split** operations (imputation) are fit on the training set only."
-)
-
-all_cols = [c for c in df.columns if c != target]
-null_counts_df = df[all_cols].isnull().sum()
-cols_with_nulls = null_counts_df[null_counts_df > 0].index.tolist()
-
-# ── Step 1 — Column removal ───────────────────────────────────────────────────
-with st.expander("Step 1 — Remove Columns", expanded=True):
-    st.caption(
-        "Select columns to **drop** from the dataset. Use the pattern filter to "
-        "quickly find columns by name fragment."
-    )
-    col_filter_a, col_filter_b = st.columns([2, 1])
-    with col_filter_a:
-        col_pattern = st.text_input(
-            "Filter by name contains…",
-            key="col_drop_filter",
-            placeholder="e.g. Post-Op, Predicted, CSVYear",
-        )
-    with col_filter_b:
-        dtype_filter = st.selectbox(
-            "Filter by dtype",
-            ["All", "numeric", "object / categorical"],
-            key="col_drop_dtype",
-        )
-
-    filtered_cols = all_cols
-    if col_pattern:
-        filtered_cols = [c for c in filtered_cols if col_pattern.lower() in c.lower()]
-    if dtype_filter == "numeric":
-        filtered_cols = [c for c in filtered_cols if pd.api.types.is_numeric_dtype(df[c])]
-    elif dtype_filter == "object / categorical":
-        filtered_cols = [c for c in filtered_cols if not pd.api.types.is_numeric_dtype(df[c])]
-
-    cols_to_drop = st.multiselect(
-        "Columns to drop",
-        options=filtered_cols,
-        default=[],
-        help="These columns are removed before anything else runs.",
-        key="cols_to_drop_select",
-    )
-    if cols_to_drop:
-        st.info(f"Will drop **{len(cols_to_drop)}** column(s): {', '.join(cols_to_drop)}")
-
-# Features remaining after drops
-remaining_feature_cols = [c for c in all_cols if c not in cols_to_drop]
-
-# ── Step 2 — Missing value rules ─────────────────────────────────────────────
-with st.expander(
-    f"Step 2 — Missing Value Rules  ({len(cols_with_nulls)} columns have nulls)",
-    expanded=bool(cols_with_nulls),
-):
-    st.caption(
-        "Configure how to handle missing values per column. "
-        "**Listwise deletion** runs *before* the split; all other strategies "
-        "are fit on training data only to prevent leakage."
-    )
-
-    null_rules: dict[str, NullHandlingRule] = {}
-
-    STRATEGY_OPTIONS = [
-        "none",
-        "listwise_delete",
-        "mean",
-        "median",
-        "mode",
-        "constant",
-        "python_expr",
-    ]
-    STRATEGY_LABELS = {
-        "none": "Leave as-is",
-        "listwise_delete": "Listwise deletion (drop rows, before split)",
-        "mean": "Fill — Mean (train only)",
-        "median": "Fill — Median (train only)",
-        "mode": "Fill — Mode / most frequent (train only)",
-        "constant": "Fill — Custom constant",
-        "python_expr": "Fill — Python expression (per-row, before split)",
-    }
-
-    # Show only columns that are not being dropped and have nulls
-    active_null_cols = [c for c in cols_with_nulls if c not in cols_to_drop]
-
-    if not active_null_cols:
-        st.info("No columns with missing values (or all are being dropped).")
-    else:
-        # Bulk action
-        bulk_col1, bulk_col2 = st.columns([2, 1])
-        with bulk_col1:
-            bulk_strategy = st.selectbox(
-                "Apply to ALL columns below",
-                ["— pick one to apply —"] + STRATEGY_OPTIONS,
-                format_func=lambda x: STRATEGY_LABELS.get(x, x),
-                key="bulk_null_strategy",
-            )
-        with bulk_col2:
-            apply_bulk = st.button("Apply bulk strategy", key="apply_bulk_null")
-
-        st.divider()
-
-        for col in active_null_cols:
-            null_ct = int(null_counts_df[col])
-            pct = round(null_ct / len(df) * 100, 1)
-            col_a, col_b, col_c = st.columns([3, 2, 3])
-
-            with col_a:
-                st.markdown(f"**{col}**")
-                st.caption(f"{null_ct:,} nulls ({pct}%) — dtype: {df[col].dtype}")
-
-            default_strategy = "none"
-            if apply_bulk and bulk_strategy != "— pick one to apply —":
-                default_strategy = bulk_strategy
-            prev_key = f"null_rule_{col}"
-            if prev_key in st.session_state:
-                default_strategy = st.session_state[prev_key]
-
-            with col_b:
-                chosen = st.selectbox(
-                    "Strategy",
-                    options=STRATEGY_OPTIONS,
-                    format_func=lambda x: STRATEGY_LABELS.get(x, x),
-                    index=STRATEGY_OPTIONS.index(default_strategy),
-                    key=f"null_strategy_{col}",
-                    label_visibility="collapsed",
-                )
-                st.session_state[prev_key] = chosen
-
-            with col_c:
-                const_val = ""
-                expr_val = ""
-                if chosen == "constant":
-                    const_val = st.text_input(
-                        "Constant value",
-                        key=f"null_const_{col}",
-                        label_visibility="collapsed",
-                        placeholder="e.g. 0, Unknown, 9",
-                    )
-                elif chosen == "python_expr":
-                    expr_val = st.text_input(
-                        "Expression (row dict available as `row`)",
-                        key=f"null_expr_{col}",
-                        label_visibility="collapsed",
-                        placeholder="row['col_a'] + row['col_b']",
-                    )
-                else:
-                    st.empty()
-
-            null_rules[col] = NullHandlingRule(
-                strategy=chosen,
-                constant_value=const_val,
-                python_expr=expr_val,
-            )
-
-# ── Step 3 — Derived columns / custom code ───────────────────────────────────
-with st.expander("Step 3 — Derived Columns & Custom Python Code", expanded=False):
-    st.caption(
-        "Add custom Python steps to compute or transform columns. "
-        "Each step runs with `df` (pandas DataFrame), `pd`, and `np` in scope. "
-        "You can mark columns to **drop after** the step — useful when a helper "
-        "column was only needed to compute another (e.g. drop Post-Op Score after "
-        "computing health_gain)."
-    )
-
-    st.markdown(
-        """**Example — compute health_gain then drop source columns:**
-```python
-df['health_gain'] = df['Knee Replacement Post-Op Q Score'] - df['Knee Replacement Pre-Op Q Score']
-```
-*Drop after:* `Knee Replacement Post-Op Q Score`, `Knee Replacement Pre-Op Q Score`
-"""
-    )
-
-    n_steps = st.number_input(
-        "Number of custom steps", min_value=0, max_value=10, value=0, step=1, key="n_derived_steps"
-    )
-
-    derived_steps: list[DerivedStep] = []
-    for i in range(int(n_steps)):
-        st.markdown(f"---\n**Step {i + 1}**")
-        sc1, sc2 = st.columns([3, 1])
-        with sc1:
-            step_name = st.text_input(
-                "Step name", key=f"ds_name_{i}", placeholder=f"e.g. Compute health_gain"
-            )
-        with sc2:
-            when = st.selectbox(
-                "Apply when",
-                ["before_split", "after_split"],
-                key=f"ds_when_{i}",
-                help="before_split: on the full dataset; after_split: on train & test separately",
-            )
-        step_code = st.text_area(
-            "Python code (`df` is the DataFrame)",
-            key=f"ds_code_{i}",
-            height=120,
-            placeholder="df['health_gain'] = df['Post-Op Score'] - df['Pre-Op Score']",
-        )
-        step_drop = st.multiselect(
-            "Drop columns after this step",
-            options=df.columns.tolist(),
-            key=f"ds_drop_{i}",
-            help="Columns to remove once the step has run (e.g. helper columns used to compute a derived feature).",
-        )
-        derived_steps.append(
-            DerivedStep(
-                name=step_name or f"Step {i + 1}",
-                code=step_code,
-                drop_after=step_drop,
-                apply_when=when,
-            )
-        )
-
-# Final feature selection after drops & derived steps
+# Selected features = remaining feature cols after drops
 selected_features = remaining_feature_cols
 if not selected_features:
-    st.warning("No feature columns remain — adjust the column removal step.")
+    st.warning("No feature columns remain — adjust Step 1.")
     st.stop()
-
-# ── Outcome threshold ─────────────────────────────────────────────────────────
-st.subheader("Outcome Threshold (optional)")
-use_thresh = st.checkbox("Enable Outcome Threshold")
-otc = OutcomeThresholdConfig()
-if use_thresh:
-    col_ot1, col_ot2, col_ot3 = st.columns(3)
-    with col_ot1:
-        thresh_val = st.number_input("Threshold value", value=0.0)
-    with col_ot2:
-        direction = st.selectbox("Direction", ["above", "below"])
-    with col_ot3:
-        pos_label = st.text_input("Positive label", "Positive")
-    neg_label = st.text_input("Negative label", "Negative")
-    derived_col = st.text_input("Derived column name", "outcome_label")
-    otc = OutcomeThresholdConfig(
-        enabled=True,
-        threshold=thresh_val,
-        direction=direction,
-        positive_label=pos_label,
-        negative_label=neg_label,
-        derived_column_name=derived_col,
-    )
-
-# ── Step 4 — Row-filter Variants ─────────────────────────────────────────────
-with st.expander("Step 4 — Row-filter Variants (generate multiple datasets at once)", expanded=False):
-    st.caption(
-        "Define filters to automatically create **multiple named dataset variants** "
-        "in one click — e.g. remove the lowest age band, highest age band, or both. "
-        "Each filter produces a separate train/test pair saved alongside the base variant. "
-        "Leave empty to only create the base (unfiltered) variant."
-    )
-
-    # Pick the column to filter on
-    filter_col_options = [c for c in remaining_feature_cols if c not in cols_to_drop]
-    fv_col = st.selectbox(
-        "Column to filter on",
-        options=["— none —"] + filter_col_options,
-        key="fv_col",
-        help="Typically 'Age Band' or any grouping column whose extreme values you want to exclude.",
-    )
-
-    row_filter_variants: list[dict] = []
-
-    if fv_col and fv_col != "— none —":
-        # Show the unique values present
-        unique_vals = sorted(df[fv_col].dropna().unique().tolist())
-        st.caption(f"Unique values in **{fv_col}**: {unique_vals}")
-
-        # Preset buttons for common NHS patterns
-        col_p1, col_p2, col_p3, col_p4 = st.columns(4)
-        with col_p1:
-            add_lowest = st.checkbox("Exclude lowest value", value=False, key="fv_lowest")
-        with col_p2:
-            add_highest = st.checkbox("Exclude highest value", value=False, key="fv_highest")
-        with col_p3:
-            add_both = st.checkbox("Exclude both extremes", value=False, key="fv_both")
-        with col_p4:
-            add_custom = st.checkbox("Custom value exclusion", value=False, key="fv_custom")
-
-        if unique_vals:
-            lowest_val = unique_vals[0]
-            highest_val = unique_vals[-1]
-
-            if add_lowest:
-                row_filter_variants.append({
-                    "label": f"no-lowest-{fv_col.lower().replace(' ', '-')}",
-                    "col": fv_col,
-                    "exclude": [lowest_val],
-                })
-            if add_highest:
-                row_filter_variants.append({
-                    "label": f"no-highest-{fv_col.lower().replace(' ', '-')}",
-                    "col": fv_col,
-                    "exclude": [highest_val],
-                })
-            if add_both:
-                row_filter_variants.append({
-                    "label": f"no-extreme-{fv_col.lower().replace(' ', '-')}",
-                    "col": fv_col,
-                    "exclude": [lowest_val, highest_val],
-                })
-            if add_custom:
-                custom_excl = st.multiselect(
-                    "Values to exclude",
-                    options=unique_vals,
-                    key="fv_custom_vals",
-                )
-                custom_label = st.text_input(
-                    "Custom variant label suffix",
-                    value="custom-filter",
-                    key="fv_custom_label",
-                )
-                if custom_excl:
-                    row_filter_variants.append({
-                        "label": re.sub(r"[^a-z0-9_-]", "-", custom_label.lower())[:30],
-                        "col": fv_col,
-                        "exclude": custom_excl,
-                    })
-
-        if row_filter_variants:
-            st.info(
-                f"Will create **{len(row_filter_variants) + 1}** variant(s): "
-                f"1 base + {', '.join(v['label'] for v in row_filter_variants)}"
-            )
 
 # ── Apply & save ──────────────────────────────────────────────────────────────
 st.divider()
 if st.button("Create variant & Continue →", type="primary", disabled=not variant_name.strip()):
+    # Build NullHandlingRule objects from session-state accumulator
+    null_rules: dict[str, NullHandlingRule] = {
+        col: NullHandlingRule(
+            strategy=rule.get("strategy", "none"),
+            constant_value=rule.get("constant_value", ""),
+            python_expr=rule.get("python_expr", ""),
+        )
+        for col, rule in st.session_state._prep_null_rules.items()
+        if col in remaining_feature_cols
+    }
+
     prep_cfg = PrepConfig(
         columns_to_drop=cols_to_drop,
         null_rules={c: r.model_dump() for c, r in null_rules.items()},
@@ -898,24 +948,19 @@ if st.button("Create variant & Continue →", type="primary", disabled=not varia
         outcome_threshold=otc,
     )
 
-    # Helper: run the full cleaning + split + imputation pipeline on a given df slice
     def _prepare_slice(df_slice: pd.DataFrame, variant_suffix: str = "") -> tuple[pd.DataFrame, pd.DataFrame] | None:
         dw = df_slice.copy()
 
-        # 1. Drop columns
         dw = apply_column_drops(dw, cols_to_drop)
 
-        # 2. Before-split derived steps
         dw, _errs = apply_derived_steps_timed(dw, derived_steps, "before_split")
         for e in _errs:
             st.error(f"[{variant_suffix}] Derived step error (before split): {e}")
 
-        # 3. Python-expression null fills
         dw, _expr_errs = apply_python_expr_rules(dw, null_rules)
         for col_e, e in _expr_errs.items():
             st.error(f"[{variant_suffix}] Python expression error for '{col_e}': {e}")
 
-        # 4. Listwise deletion
         dw, _deleted = apply_listwise_deletions(dw, null_rules)
         for col_d, n in _deleted.items():
             st.info(f"[{variant_suffix}] Listwise deletion on '{col_d}': removed **{n:,}** rows.")
@@ -924,14 +969,11 @@ if st.button("Create variant & Continue →", type="primary", disabled=not varia
             st.error(f"[{variant_suffix}] No rows remain after listwise deletion — skipping.")
             return None
 
-        # 5. Outcome threshold
         dw = apply_outcome_threshold(dw, target, otc)
 
-        # 6. Stratified split on target
         if split_method == "time" and time_col and cutoff:
             tr, te = time_split(dw, time_col, cutoff)
         elif stratify and task == "regression":
-            # Bin the target into quantiles for stratification
             import numpy as np
             bins = min(stratify_bins, dw[target].nunique())
             try:
@@ -939,29 +981,22 @@ if st.button("Create variant & Continue →", type="primary", disabled=not varia
             except Exception:
                 strat_col = None
             from sklearn.model_selection import train_test_split as _tts
-            tr, te = _tts(
-                dw,
-                test_size=test_size,
-                random_state=int(seed),
-                stratify=strat_col,
-            )
+            tr, te = _tts(dw, test_size=test_size, random_state=int(seed), stratify=strat_col)
             tr = tr.reset_index(drop=True)
             te = te.reset_index(drop=True)
         else:
             tr, te = random_split(dw, target, prep_cfg)
 
-        # 7. Constant / mean / median / mode imputation (fit on train only)
         tr, te, fill_vals = apply_imputation(tr, te, null_rules)
         if fill_vals and not variant_suffix:
             with st.expander("Imputation fill values (from training set)", expanded=False):
                 st.json({k: (float(v) if hasattr(v, "item") else v) for k, v in fill_vals.items()})
 
-        # 8. Stage-4 imputation config
         miss_cfg_raw = state.missing_cfg
-        if imputation_choice == "Use config from Stage 4" and miss_cfg_raw:
+        if imputation_fallback == "Use config from Stage 4" and miss_cfg_raw:
             miss_cfg = MissingConfig.model_validate(miss_cfg_raw)
             tr, te, _ = fit_apply_config(miss_cfg, tr, te)
-        elif imputation_choice == "Median / mode (override)":
+        elif imputation_fallback == "Median / mode":
             from sklearn.impute import SimpleImputer
             num_c = tr.select_dtypes(include="number").columns.difference([target])
             cat_c = tr.select_dtypes(include=["object", "category"]).columns
@@ -976,7 +1011,7 @@ if st.button("Create variant & Continue →", type="primary", disabled=not varia
                 ci = SimpleImputer(strategy="most_frequent")
                 tr[cat_c] = ci.fit_transform(tr[cat_c])
                 te[cat_c] = ci.transform(te[cat_c])
-        elif imputation_choice == "MICE (IterativeImputer, slow)":
+        elif imputation_fallback == "MICE (IterativeImputer, slow)":
             from sklearn.experimental import enable_iterative_imputer  # noqa
             from sklearn.impute import IterativeImputer, SimpleImputer
             num_c = tr.select_dtypes(include="number").columns.difference([target])
@@ -992,17 +1027,15 @@ if st.button("Create variant & Continue →", type="primary", disabled=not varia
                 ci = SimpleImputer(strategy="most_frequent")
                 tr[cat_c] = ci.fit_transform(tr[cat_c])
                 te[cat_c] = ci.transform(te[cat_c])
-        elif imputation_choice == "Drop rows with any missing":
+        elif imputation_fallback == "Drop rows with any missing":
             tr = tr.dropna()
             te = te.dropna()
 
-        # 9. Stage-5 feature engineering
         feat_cfg_raw = state.feature_cfg
         if feat_cfg_raw:
             feat_cfg = FeatureConfig.model_validate(feat_cfg_raw)
             tr, te = apply_feature_config(tr, te, feat_cfg, target)
 
-        # 10. After-split derived steps
         tr, _errs2 = apply_derived_steps_timed(tr, derived_steps, "after_split")
         te, _errs3 = apply_derived_steps_timed(te, derived_steps, "after_split")
         for e in _errs2 + _errs3:
@@ -1010,7 +1043,6 @@ if st.button("Create variant & Continue →", type="primary", disabled=not varia
 
         return tr, te
 
-    # Build the list of all (name, df_slice) to process
     all_col_features = [c for c in df.columns if c != target]
     df_base = df[selected_features + [target]].copy()
 
@@ -1027,7 +1059,7 @@ if st.button("Create variant & Continue →", type="primary", disabled=not varia
     out_dir = project_datasets_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     method_label = (
-        f"{imputation_choice.split('(')[0].strip()} | "
+        f"{imputation_fallback.split('(')[0].strip()} | "
         f"split={test_size:.0%} | stratify={stratify} | "
         f"features={len(selected_features)}/{len(all_col_features)}"
     )
@@ -1061,16 +1093,14 @@ if st.button("Create variant & Continue →", type="primary", disabled=not varia
                 set_active=(v_name == variants_to_create[0][0]),
             )
 
-            # Show distribution chart for this variant
             st.markdown(f"**{v_name}** — {split_result.n_train:,} train / {split_result.n_test:,} test")
-            c1, c2 = st.columns(2)
-            with c1:
+            _rc1, _rc2 = st.columns(2)
+            with _rc1:
                 st.plotly_chart(split_summary_bar(split_result.n_train, split_result.n_test), use_container_width=True)
-            with c2:
+            with _rc2:
                 if split_result.class_balance_train:
                     st.plotly_chart(class_balance_bar(split_result.class_balance_train, "Train target balance"), use_container_width=True)
                 else:
-                    # For regression: show target distribution comparison
                     import plotly.graph_objects as go
                     fig = go.Figure()
                     fig.add_trace(go.Histogram(x=v_train[target], name="Train", opacity=0.7, nbinsx=30))

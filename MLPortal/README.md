@@ -8,6 +8,15 @@ results and explain predictions — all in one interactive app.
 
 ## Quick start
 
+Operating System,Shell / Terminal,Activation Command
+macOS / Linux,Bash / Zsh (Default),source .venv/bin/activate
+,Fish,source .venv/bin/activate.fish
+,Csh / Tcsh,source .venv/bin/activate.csh
+
+Windows,Command Prompt (cmd),.venv\Scripts\activate.bat
+,PowerShell,.venv\Scripts\activate.ps1
+,Git Bash,source .venv/Scripts/activate
+
 ### 1. Install dependencies
 
 ```bash

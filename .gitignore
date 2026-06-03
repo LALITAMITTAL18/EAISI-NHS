@@ -213,3 +213,5 @@ notebooks/Experiment/Knee/models/
 notebooks/Experiment/Knee/catboost_info/catboost_training.json
 *.joblib
 nhs_proms_pipeline/
+cUsersmittallsourceEAISINHSEAISI-NHSnotebooksExperimentKnee_nb22_extracted.txt
+cUsersmittallsourceEAISINHSEAISI-NHSnotebooksExperimentKnee_nb21_extracted.txt

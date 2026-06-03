@@ -28,7 +28,7 @@ _PAGE_PATHS: dict[str, str] = {
     "preparation": "pages/6_preparation.py",
     "modelling":   "pages/7_modelling.py",
     "comparison":  "pages/8_comparison.py",
-    "explanation": "pages/9_explanation.py",
+    "explanation": "pages/9_clinical_insight.py",
     "conclusions": "pages/10_conclusions.py",
 }
 

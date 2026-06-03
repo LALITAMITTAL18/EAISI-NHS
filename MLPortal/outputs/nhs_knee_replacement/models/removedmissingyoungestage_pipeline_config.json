@@ -1,0 +1,25 @@
+{
+  "task": "regression",
+  "target_column": "health_gain",
+  "selected_models": [
+    "Ridge",
+    "Lasso",
+    "ElasticNet",
+    "RandomForestRegressor",
+    "HistGradientBoostingRegressor",
+    "XGBRegressor",
+    "CatBoostRegressor",
+    "LGBMRegressor"
+  ],
+  "optuna": {
+    "n_trials": 40,
+    "cv_folds": 3,
+    "timeout_seconds": null,
+    "metric": "neg_root_mean_squared_error",
+    "sampler": "tpe",
+    "random_seed": 42
+  },
+  "outcome_threshold": null,
+  "class_imbalance": "balanced",
+  "random_seed": 42
+}

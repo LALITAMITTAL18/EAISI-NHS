@@ -136,6 +136,103 @@ def subgroup_bar(subgroup_df: pd.DataFrame, group_col: str, target: str) -> go.F
     return fig
 
 
+def grouped_count_plot(
+    df: pd.DataFrame,
+    value_col: str,
+    group_col: str,
+    normalize: bool = False,
+) -> go.Figure:
+    """Stacked bar chart: count (or %) of each *value_col* category per *group_col* group.
+
+    Useful for seeing how a binary/categorical outcome splits across groups,
+    e.g. No_Benefit (0/1) by Age Band.
+    """
+    clean = df[[value_col, group_col]].dropna().copy()
+    clean[group_col] = clean[group_col].astype(str)
+    clean[value_col] = clean[value_col].astype(str)
+
+    ct = pd.crosstab(clean[group_col], clean[value_col])
+    if normalize:
+        ct = ct.div(ct.sum(axis=1), axis=0).mul(100).round(1)
+
+    # Sort groups by total count descending so biggest groups come first
+    ct = ct.loc[ct.sum(axis=1).sort_values(ascending=False).index]
+
+    categories = ct.columns.tolist()
+    palette = [PALETTE.highlight, PALETTE.secondary, PALETTE.gray, "#A8D8A8", "#F4A261"]
+
+    ylabel = f"% of group" if normalize else "Count"
+    fig = base_fig(
+        title=f"{value_col} counts by {group_col}",
+        xlabel=str(group_col),
+        ylabel=ylabel,
+    )
+    for i, cat in enumerate(categories):
+        color = palette[i % len(palette)]
+        y_vals = ct[cat].tolist()
+        hover = (
+            f"{group_col}: %{{x}}<br>{value_col}={cat}<br>{ylabel}: %{{y}}<extra></extra>"
+        )
+        fig.add_trace(
+            go.Bar(
+                x=ct.index.tolist(),
+                y=y_vals,
+                name=f"{value_col} = {cat}",
+                marker_color=color,
+                hovertemplate=hover,
+            )
+        )
+    fig.update_layout(barmode="stack", legend_title_text=value_col)
+    return fig
+
+
+def grouped_distribution_plot(
+    df: pd.DataFrame,
+    value_col: str,
+    group_col: str,
+    plot_type: str = "box",
+) -> go.Figure:
+    """Distribution of *value_col* broken out by *group_col*.
+
+    plot_type: "box" or "violin"
+    Numeric value columns are sorted by group median; others sorted alphabetically.
+    """
+    clean = df[[value_col, group_col]].dropna().copy()
+    clean[group_col] = clean[group_col].astype(str)
+
+    if pd.api.types.is_numeric_dtype(clean[value_col]):
+        groups = (
+            clean.groupby(group_col)[value_col]
+            .median()
+            .sort_values()
+            .index.tolist()
+        )
+    else:
+        groups = sorted(clean[group_col].unique().tolist())
+
+    colors = [PALETTE.highlight if i == 0 else PALETTE.gray for i in range(len(groups))]
+
+    fig = base_fig(
+        title=f"{value_col} distribution by {group_col}",
+        xlabel=str(group_col),
+        ylabel=str(value_col),
+    )
+    for color, group in zip(colors, groups):
+        subset = clean.loc[clean[group_col] == group, value_col]
+        common = dict(
+            y=subset,
+            name=group,
+            marker_color=color,
+            hovertemplate=f"{group_col}={group}<br>{value_col}: %{{y:.2f}}<extra></extra>",
+        )
+        if plot_type == "violin":
+            fig.add_trace(go.Violin(x=[group] * len(subset), box_visible=True, meanline_visible=True, **common))
+        else:
+            fig.add_trace(go.Box(x=[group] * len(subset), boxmean="sd", **common))
+    fig.update_layout(showlegend=False)
+    return fig
+
+
 def qq_plot(theoretical: list[float], observed: list[float], col_name: str) -> go.Figure:
     """Q-Q plot for normality assessment."""
     lo = min(min(theoretical), min(observed))

@@ -1,0 +1,228 @@
+"""GPT-4o clinical decision support via Azure OpenAI (Azure AI Foundry endpoint).
+
+Two LLM functions:
+  generate_medical_advice()   — structured clinical recommendation (JSON output)
+  generate_shap_explanation() — per-feature explanation of why each factor matters clinically
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent.parent / ".env", override=False)
+except ImportError:
+    pass
+
+from stages.clinical_insight.models import (
+    KL_DESCRIPTIONS,
+    KL_SURGERY_GUIDANCE,
+    ShapResult,
+    TabularPredictionResult,
+    XrayPredictionResult,
+)
+
+AZURE_OPENAI_ENDPOINT = os.environ.get(
+    "AZURE_OPENAI_ENDPOINT",
+    "https://AIFoundryHRPolicies.services.ai.azure.com/openai/v1",
+)
+AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
+
+_SYSTEM_CLINICAL = """You are a clinical AI assistant helping orthopaedic surgeons make \
+evidence-based decisions about knee replacement surgery. Respond in valid JSON only — \
+no markdown fences, no extra text. Your tone is direct, professional, and clinician-facing."""
+
+_SYSTEM_SHAP = """You are a clinical AI assistant explaining machine learning model outputs \
+to orthopaedic surgeons. For each patient feature, explain in plain clinical language why \
+that factor increases or decreases the predicted post-surgical benefit. Be concise (1-2 sentences \
+per feature). Respond in valid JSON only."""
+
+
+def _get_client():
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise ImportError("Install openai: pip install openai") from exc
+
+    key = os.environ.get("AZURE_OPENAI_API_KEY", AZURE_OPENAI_API_KEY)
+    if not key:
+        raise ValueError(
+            "AZURE_OPENAI_API_KEY is not set. Add it to MLPortal/.env and restart the app."
+        )
+    return OpenAI(
+        base_url=os.environ.get("AZURE_OPENAI_ENDPOINT", AZURE_OPENAI_ENDPOINT),
+        api_key=key,
+    )
+
+
+def generate_medical_advice(
+    rf_result: TabularPredictionResult | None,
+    shap_result: ShapResult | None,
+    xray_result: XrayPredictionResult | None,
+    patient_features: dict | None = None,
+) -> dict:
+    """Return a structured dict with clinical recommendation sections.
+
+    Keys: bottom_line, recommendation, key_considerations (list),
+          caveats (list), next_steps (list), urgency
+    """
+    sections = _build_context(rf_result, shap_result, xray_result, patient_features)
+
+    prompt = f"""{sections}
+
+Return a JSON object with exactly these keys:
+{{
+  "bottom_line": "<one clear sentence — surgery recommended / not recommended / further assessment needed>",
+  "urgency": "<one of: Routine | Soon (3-6 months) | Urgent | Not indicated>",
+  "recommendation": "<2-3 sentence paragraph with the balanced surgical/conservative rationale>",
+  "key_considerations": ["<3-4 bullet points the clinical team should discuss>"],
+  "caveats": ["<2-3 important limitations or missing information>"],
+  "next_steps": ["<3-4 concrete actions: assessments, referrals, trials>"]
+}}"""
+
+    client = _get_client()
+    resp = client.chat.completions.create(
+        model=AZURE_OPENAI_DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": _SYSTEM_CLINICAL},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=900,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+    raw = resp.choices[0].message.content
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {"bottom_line": raw, "recommendation": "", "key_considerations": [],
+                "caveats": [], "next_steps": [], "urgency": "Unknown"}
+
+
+def generate_shap_explanation(
+    feature_names: list[str],
+    shap_values: list[float],
+    feature_values: dict,
+    prediction: float,
+    top_n: int = 8,
+) -> list[dict]:
+    """Return a list of per-feature clinical explanations.
+
+    Each item: {feature, value, shap, direction, explanation}
+    """
+    # Sort by absolute SHAP, take top_n
+    pairs = sorted(
+        zip(feature_names, shap_values),
+        key=lambda x: abs(x[1]),
+        reverse=True,
+    )[:top_n]
+
+    feature_lines = []
+    for fname, sval in pairs:
+        fval = feature_values.get(fname, "unknown")
+        direction = "increases" if sval > 0 else "decreases"
+        feature_lines.append(
+            f'- {fname}: value={fval}, SHAP={sval:+.3f} ({direction} predicted benefit)'
+        )
+
+    prompt = f"""The Random Forest model predicts a post-surgical health gain of {prediction:.1f} OKS points.
+
+Top contributing features (SHAP analysis):
+{chr(10).join(feature_lines)}
+
+For each feature, explain in 1-2 plain sentences why this patient factor clinically \
+increases or decreases expected surgical benefit. Use evidence-based reasoning \
+(e.g. pre-op score, BMI, comorbidities, age effects on TKR outcomes).
+
+Return a JSON array:
+[
+  {{
+    "feature": "<feature name>",
+    "patient_value": "<value>",
+    "shap": <float>,
+    "direction": "positive" or "negative",
+    "clinical_explanation": "<1-2 sentences>"
+  }},
+  ...
+]"""
+
+    client = _get_client()
+    resp = client.chat.completions.create(
+        model=AZURE_OPENAI_DEPLOYMENT,
+        messages=[
+            {"role": "system", "content": _SYSTEM_SHAP},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=900,
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+    raw = resp.choices[0].message.content
+    try:
+        parsed = json.loads(raw)
+        # Handle both {"items": [...]} and plain [...]
+        if isinstance(parsed, list):
+            return parsed
+        for key in ("items", "features", "explanations", "results"):
+            if key in parsed and isinstance(parsed[key], list):
+                return parsed[key]
+        return list(parsed.values())[0] if parsed else []
+    except Exception:
+        return [{"feature": k, "patient_value": feature_values.get(k, ""),
+                 "shap": v, "direction": "positive" if v > 0 else "negative",
+                 "clinical_explanation": ""}
+                for k, v in pairs]
+
+
+def _build_context(
+    rf_result: TabularPredictionResult | None,
+    shap_result: ShapResult | None,
+    xray_result: XrayPredictionResult | None,
+    patient_features: dict | None,
+) -> str:
+    sections = []
+
+    if xray_result is not None:
+        kl = xray_result.kl_grade
+        sections.append(
+            f"X-RAY (KL Grade): Grade {kl} — {KL_DESCRIPTIONS.get(kl, '')} "
+            f"(confidence {xray_result.confidence:.0%}). "
+            f"Guidance: {KL_SURGERY_GUIDANCE.get(kl, '')}"
+        )
+
+    if rf_result is not None:
+        sections.append(
+            f"TABULAR MODEL: Predicted OKS improvement = {rf_result.prediction:.1f} pts "
+            f"({'above' if rf_result.prediction >= 5 else 'below'} 5 pt MCID threshold). "
+            f"Model: {rf_result.model_name}."
+        )
+
+    if shap_result is not None and shap_result.feature_names:
+        top = list(zip(shap_result.feature_names[:5], shap_result.mean_abs_shap[:5]))
+        shap_str = ", ".join(f"{f} ({v:+.2f})" for f, v in top)
+        sections.append(f"TOP SHAP DRIVERS: {shap_str}")
+
+    if patient_features:
+        key_fields = {
+            k: v for k, v in patient_features.items()
+            if any(kw in k.lower() for kw in ["age", "bmi", "oks", "eq", "gender", "sex", "score"])
+        }
+        if key_fields:
+            sections.append("PATIENT: " + ", ".join(f"{k}={v}" for k, v in key_fields.items()))
+
+    return "\n".join(sections)
+
+
+def _health_gain_narrative(score: float) -> str:
+    if score < 5:
+        return f"{score:.1f} pts — below MCID; limited benefit expected"
+    elif score < 10:
+        return f"{score:.1f} pts — modest benefit; shared decision-making essential"
+    elif score < 15:
+        return f"{score:.1f} pts — good expected outcome"
+    else:
+        return f"{score:.1f} pts — high expected benefit; surgery well-indicated"

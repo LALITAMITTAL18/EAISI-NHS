@@ -12,7 +12,8 @@ openpyxl>=3.1.0
 plotly>=5.20.0
 
 # Machine learning — sklearn
-scikit-learn>=1.4.0
+# NOTE: RF pipeline was serialised with 1.8.0 — pin to avoid InconsistentVersionWarning on load
+scikit-learn==1.8.0
 
 # Gradient boosting libraries (install all for full model registry)
 xgboost>=2.0.0
@@ -40,3 +41,10 @@ shap>=0.45.0
 
 # Optional — SMOTE for class imbalance:
 # imbalanced-learn>=0.12.0
+
+# Azure ML + Azure Identity (Stage 9 — Clinical Insight)
+azure-ai-ml>=1.15.0
+azure-identity>=1.16.0
+
+# Azure OpenAI / GPT-4o via AI Foundry (Stage 9 — Clinical Insight)
+openai>=1.30.0

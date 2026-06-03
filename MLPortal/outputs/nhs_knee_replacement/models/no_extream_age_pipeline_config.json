@@ -2,9 +2,9 @@
   "task": "regression",
   "target_column": "health_gain",
   "selected_models": [
-    "HistGradientBoostingRegressor",
-    "CatBoostRegressor",
-    "LGBMRegressor"
+    "Ridge",
+    "Lasso",
+    "ElasticNet"
   ],
   "optuna": {
     "n_trials": 40,

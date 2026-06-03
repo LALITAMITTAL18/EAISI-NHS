@@ -1,0 +1,168 @@
+"""Local EfficientNet-B4 inference for knee X-ray KL grade classification.
+
+Loads the checkpoint at notebooks/DeepLearning/model/best_efficientnet_b4.pth
+and replicates the exact preprocessing from the training notebook:
+  - CLAHE (clip_limit=2.0, tile_grid=8×8) on grayscale → 3-channel RGB
+  - Resize to 380×380
+  - ImageNet normalisation
+
+Requires: torch, torchvision, Pillow, opencv-python (cv2)
+Install : pip install torch torchvision Pillow opencv-python
+"""
+
+from __future__ import annotations
+
+import io
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+# Resolved relative to this file: MLPortal/stages/clinical_insight/ → repo root
+_REPO_ROOT = Path(__file__).parent.parent.parent.parent  # …/EAISI-NHS
+DEFAULT_CHECKPOINT = _REPO_ROOT / "notebooks" / "DeepLearning" / "model" / "best_efficientnet_b4.pth"
+SAMPLE_IMAGES_DIR = _REPO_ROOT / "notebooks" / "DeepLearning" / "data" / "auto_test"
+
+# Known config matching training notebook (GPU branch: B4, IMG_SIZE=380)
+_DEFAULT_CFG: dict[str, Any] = {
+    "architecture": "efficientnet_b4",
+    "num_classes": 5,
+    "img_size": 380,
+    "class_names": ["Grade 0", "Grade 1", "Grade 2", "Grade 3", "Grade 4"],
+    "grade_labels": {0: "Healthy", 1: "Doubtful", 2: "Minimal", 3: "Moderate", 4: "Severe"},
+}
+
+
+def load_local_model(checkpoint_path: Path | None = None) -> tuple[Any, dict]:
+    """Load checkpoint and return (model_eval, config_dict).
+
+    Handles two checkpoint formats:
+      - Full dict: {'model_state_dict': ..., 'num_classes': 5, 'img_size': 380, ...}
+      - Bare state dict: {layer_name: tensor, ...}
+    """
+    try:
+        import torch
+        from torchvision import models as tv_models
+    except ImportError as exc:
+        raise ImportError(
+            "PyTorch is required for local DL inference. "
+            "Install it: pip install torch torchvision"
+        ) from exc
+
+    path = Path(checkpoint_path or DEFAULT_CHECKPOINT)
+    if not path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {path}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    raw = torch.load(path, map_location=device, weights_only=False)
+
+    # Detect checkpoint format
+    if isinstance(raw, dict) and "model_state_dict" in raw:
+        state_dict = raw["model_state_dict"]
+        cfg = {**_DEFAULT_CFG}
+        for key in ("num_classes", "img_size", "class_names", "architecture"):
+            if key in raw:
+                cfg[key] = raw[key]
+    else:
+        # Assume raw is a bare state dict
+        state_dict = raw
+        cfg = {**_DEFAULT_CFG}
+
+    num_classes = cfg["num_classes"]
+    arch = cfg.get("architecture", "efficientnet_b4")
+
+    backbone_fn = getattr(tv_models, arch, tv_models.efficientnet_b4)
+    net = backbone_fn(weights=None)
+
+    # Build the classifier head that matches the checkpoint.
+    # Inspect the state dict to detect the architecture automatically.
+    clf_keys = {k: v for k, v in state_dict.items() if k.startswith("classifier.")}
+    head = _build_classifier_head(clf_keys, num_classes)
+    net.classifier = head
+
+    net.load_state_dict(state_dict, strict=True)
+    net.to(device).eval()
+
+    cfg["_device"] = device
+    return net, cfg
+
+
+def predict_xray(model: Any, cfg: dict, image_source: bytes | Path | str) -> dict:
+    """Run single-pass inference on a knee X-ray.
+
+    Parameters
+    ----------
+    model       : loaded EfficientNet model in eval mode
+    cfg         : config dict from load_local_model
+    image_source: raw image bytes, or a Path/str to an image file
+
+    Returns
+    -------
+    dict with keys: kl_grade, confidence, class_probabilities, class_names, grade_label
+    """
+    try:
+        import torch
+        import torchvision.transforms as T
+        from PIL import Image
+    except ImportError as exc:
+        raise ImportError("Install: pip install torch torchvision Pillow") from exc
+
+    if isinstance(image_source, (str, Path)):
+        img = Image.open(Path(image_source)).convert("RGB")
+    else:
+        img = Image.open(io.BytesIO(image_source)).convert("RGB")
+
+    img_size = cfg.get("img_size", 380)
+    device = cfg.get("_device", torch.device("cpu"))
+
+    transform = T.Compose([
+        T.Lambda(_apply_clahe),
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    tensor = transform(img).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        logits = model(tensor)
+        probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+
+    predicted = int(probs.argmax())
+    class_names = cfg.get("class_names", [f"Grade {i}" for i in range(len(probs))])
+    grade_labels = cfg.get("grade_labels", {})
+
+    return {
+        "kl_grade": predicted,
+        "confidence": float(probs.max()),
+        "class_probabilities": probs.tolist(),
+        "class_names": class_names,
+        "grade_label": grade_labels.get(predicted, ""),
+    }
+
+
+def list_sample_images(grade: int) -> list[Path]:
+    """Return all image paths for a given KL grade in the auto_test folder."""
+    grade_dir = SAMPLE_IMAGES_DIR / str(grade)
+    if not grade_dir.exists():
+        return []
+    exts = {".png", ".jpg", ".jpeg"}
+    return sorted(p for p in grade_dir.iterdir() if p.suffix.lower() in exts)
+
+
+def _apply_clahe(pil_img) -> "PIL.Image.Image":
+    """CLAHE preprocessing matching the training pipeline exactly."""
+    try:
+        import cv2
+        from PIL import Image as _PILImage
+        arr = np.array(pil_img.convert("L"))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(arr)
+        rgb = np.stack([enhanced, enhanced, enhanced], axis=-1)
+        return _PILImage.fromarray(rgb)
+    except ImportError:
+        # Fallback: skip CLAHE if cv2 not available (slightly lower accuracy)
+        from PIL import Image as _PILImage
+        gray = np.array(pil_img.convert("L"))
+        rgb = np.stack([gray, gray, gray], axis=-1)
+        return _PILImage.fromarray(rgb)

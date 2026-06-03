@@ -7,9 +7,11 @@ import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
+    fbeta_score,
     f1_score,
     mean_absolute_error,
     mean_squared_error,
+    precision_recall_curve,
     precision_score,
     r2_score,
     recall_score,
@@ -117,7 +119,12 @@ def compare_models(
     for result in results:
         if result.pipeline is None:
             continue
-        y_pred = result.pipeline.predict(X_test)
+        try:
+            y_pred = result.pipeline.predict(X_test)
+        except Exception:
+            # Column mismatch or other prediction failure — skip this model
+            # rather than aborting the entire variant comparison.
+            continue
 
         if task == "regression":
             row = evaluate_regression(
@@ -236,3 +243,77 @@ def subgroup_eval(
             )
         )
     return results
+
+
+def compute_pr_analysis(
+    variant_data: list[dict],
+    mcid: float = 7.0,
+    target_precision: float = 0.80,
+) -> list[dict]:
+    """Precision-recall analysis for regression-as-classification at MCID threshold.
+
+    Each entry in variant_data must have keys: dataset, model_name, y_test, y_pred.
+    Positive class = predicted improvement below MCID (no clinical benefit).
+
+    Returns list of dicts with display columns and private underscore keys for plotting.
+    """
+    p_label = int(target_precision * 100)
+    summary: list[dict] = []
+
+    for entry in variant_data:
+        y_test = np.asarray(entry["y_test"], dtype=float)
+        y_pred = np.asarray(entry["y_pred"], dtype=float)
+        valid = ~np.isnan(y_test)
+        y_test, y_pred = y_test[valid], y_pred[valid]
+        if len(y_test) == 0:
+            continue
+
+        # Binarise: positive = "no clinical benefit" (actual gain < MCID)
+        y_t_bin = (y_test < mcid).astype(int)
+        # Use -y_pred as score so lower predictions rank as more likely positive
+        y_scores = -y_pred
+        prevalence = float(y_t_bin.mean())
+
+        prec_c, rec_c, thr_c = precision_recall_curve(y_t_bin, y_scores)
+        ap = float(average_precision_score(y_t_bin, y_scores))
+
+        # Operating point at default MCID threshold
+        y_bin_mcid = (y_pred < mcid).astype(int)
+        op_prec = float(precision_score(y_t_bin, y_bin_mcid, zero_division=0))
+        op_rec = float(recall_score(y_t_bin, y_bin_mcid, zero_division=0))
+        op_f2 = float(fbeta_score(y_t_bin, y_bin_mcid, beta=2, zero_division=0))
+
+        # Find threshold achieving target_precision with maximum recall
+        prec_inner, rec_inner = prec_c[:-1], rec_c[:-1]
+        valid_idx = np.where(prec_inner >= target_precision)[0]
+        if len(valid_idx) > 0:
+            best_idx = valid_idx[np.argmax(rec_inner[valid_idx])]
+            tp_thr = float(-thr_c[best_idx])
+            tp_prec = float(prec_inner[best_idx])
+            tp_rec = float(rec_inner[best_idx])
+        else:
+            tp_thr = tp_prec = tp_rec = None
+
+        summary.append({
+            "Dataset": entry["dataset"],
+            "Model": entry["model_name"],
+            "AP": round(ap, 4),
+            "Precision@MCID": round(op_prec, 4),
+            "Recall@MCID": round(op_rec, 4),
+            "F2@MCID": round(op_f2, 4),
+            "Prevalence (%)": round(prevalence * 100, 1),
+            f"Thr@P{p_label}": round(tp_thr, 3) if tp_thr is not None else None,
+            f"Prec@P{p_label}": round(tp_prec, 4) if tp_prec is not None else None,
+            f"Recall@P{p_label}": round(tp_rec, 4) if tp_rec is not None else None,
+            # Private curve data for plots
+            "_prec_c": prec_c,
+            "_rec_c": rec_c,
+            "_op_prec": op_prec,
+            "_op_rec": op_rec,
+            "_tp_thr": tp_thr,
+            "_tp_prec": tp_prec,
+            "_tp_rec": tp_rec,
+            "_prev": prevalence,
+        })
+
+    return summary
