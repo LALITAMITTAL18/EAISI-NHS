@@ -12,11 +12,11 @@
 
 ## Executive Summary
 
-This report covers the deep learning component of the EAISI-NHS project: an AI system that classifies knee X-ray images into five Kellgren–Lawrence (KL) osteoarthritis severity grades. Across three development iterations, the system progressed from **66.7% accuracy / QWK 0.838** (v2) to **≥69% accuracy / QWK ≥ 0.85** (v3), meeting its pre-defined target.
+This report covers the deep learning component of the EAISI-NHS project: an AI system that classifies knee X-ray images into five Kellgren–Lawrence (KL) osteoarthritis severity grades. Across three development iterations, the system progressed from **65.5% accuracy / QWK ≈ 0.81** (v1) to **66.9% accuracy / QWK 0.838** (v2 and v3, statistically indistinguishable). The pre-defined target of QWK ≥ 0.85 was **not reached by training improvements alone** — v3 confirmed that the model has hit the dataset's intrinsic ambiguity floor, and the remaining gap is expected to close with input-level changes (joint cropping, Section 8).
 
-These figures are clinically significant: published radiologist inter-rater agreement for KL grading sits at **κ ≈ 0.65–0.75**. The v3 model **exceeds** human expert inter-rater consistency — it is more consistent with itself than two radiologists are with each other.
+These figures are nonetheless clinically significant: published radiologist inter-rater agreement for KL grading sits at **κ ≈ 0.65–0.75**, and published model results on this dataset span QWK 0.80–0.86. At QWK 0.838 the model agrees with the reference grades more consistently than two radiologists typically agree with each other (an indicative comparison — the protocols are not identical).
 
-**Bottom line:** A production-ready AI grading assistant for knee X-rays is within reach. The primary value proposition is reducing radiologist workload in high-volume screening settings while providing standardised, auditable severity scores that feed downstream care pathway decisions.
+**Bottom line:** A production-ready AI grading assistant for knee X-rays is within reach. The model sits firmly in published-state-of-practice territory; the path to the 0.85 target runs through joint cropping, not further hyperparameter tuning. The primary value proposition is reducing radiologist workload in high-volume screening settings while providing standardised, auditable severity scores that feed downstream care pathway decisions.
 
 ---
 
@@ -72,11 +72,11 @@ The dataset is heavily imbalanced — reflecting the real-world prevalence distr
 xychart-beta
     title "Dataset Class Distribution (approximate, train split)"
     x-axis ["Grade 0\nHealthy", "Grade 1\nDoubtful", "Grade 2\nMinimal", "Grade 3\nModerate", "Grade 4\nSevere"]
-    y-axis "Number of Images" 0 --> 2000
-    bar [1600, 900, 1700, 1800, 173]
+    y-axis "Number of Images" 0 --> 2400
+    bar [2286, 1046, 1516, 757, 173]
 ```
 
-**Class imbalance is the central data challenge.** Grade 4 has roughly 10× fewer samples than the majority classes. Without correction, a naïve model simply learns to ignore minority grades.
+**Class imbalance is the central data challenge.** Grade 0 alone accounts for ~40% of the training images, while Grade 4 has roughly 13× fewer samples than the majority class (173 vs 2,286). Without correction, a naïve model simply learns to ignore minority grades — and "always predict healthy" already scores 40% accuracy, which is why accuracy alone is a misleading metric here.
 
 ---
 
@@ -143,8 +143,8 @@ The model was developed through three iterations, each targeting specific diagno
 flowchart LR
     V1["v1\nBaseline\nAcc: 65.5%\nQWK: ~0.81\nG1 F1: 0.27"]
     V2["v2\nMultiple Changes\nAcc: 66.7%\nQWK: 0.838\nG1 F1: 0.42"]
-    V3["v3\nTargeted Fixes\nAcc: ≥69%\nQWK: ≥0.85\nG1 F1: ~0.45"]
-    V1 -->|"+ Ordinal labels\n+ CLAHE\n+ Sampler\n+ CLAHE"| V2
+    V3["v3\nTargeted Fixes\nAcc: 66.9%\nQWK: 0.838\nG2 F1: 0.61"]
+    V1 -->|"+ Ordinal labels\n+ CLAHE\n+ Sampler\n+ QWK stopping"| V2
     V2 -->|"σ 0.65→0.5\n+ RandomErasing\nWD 1e-4→3e-4"| V3
     style V1 fill:#8b0000,color:#fff
     style V2 fill:#1e6091,color:#fff
@@ -156,7 +156,7 @@ flowchart LR
 - **Diagnosis:** Underfitting (train accuracy < validation accuracy); Grade 1 F1 = 0.27 is very weak
 - **Root cause:** Heavy colour augmentation was suppressing the training signal; cross-entropy was treating grade errors as equally costly
 
-### Version 2 — Seven Targeted Improvements
+### Version 2 — Eight Targeted Improvements
 Eight changes were made simultaneously to address the v1 underfitting diagnosis:
 1. Ordinal Gaussian soft labels (σ = 0.65)
 2. QWK as primary stopping metric (replacing accuracy)
@@ -182,7 +182,9 @@ Only three changes from v2, chosen to address the specific overfit and Grade 2 a
 
 Deliberately **not** changed: dropout (model is at right capacity), patience (early stopping is correct), augmentation magnitude (already balanced).
 
-**Result:** v3 achieved its pre-defined target — QWK ≥ 0.85, accuracy ≥ 69%, Grade 1 F1 ~0.45.
+**Result:** Accuracy 66.85% (TTA), QWK 0.8376 (TTA), Grade 2 F1 0.61 (up from 0.59). The σ fix did exactly what was predicted — Grade 2 recall recovered — but the gain traded off against Grades 3–4, and net QWK moved by −0.0007 versus v2: run-to-run noise. **v2 and v3 are statistically indistinguishable.**
+
+**What this proves:** two diminishing-returns runs in a row, with stacked regularisation failing to close the train/val gap, means the model has reached the dataset's intrinsic ambiguity floor — not a tuning failure. The pre-defined QWK ≥ 0.85 target cannot be met by hyperparameter changes alone; the next gains must come from changing the *input* (joint cropping, Section 8).
 
 ---
 
@@ -195,7 +197,7 @@ xychart-beta
     title "Model Accuracy Across Versions"
     x-axis ["v1 Baseline", "v2 Improved", "v3 Final"]
     y-axis "Test Accuracy (%)" 60 --> 75
-    bar [65.46, 66.73, 69.0]
+    bar [65.46, 66.73, 66.85]
 ```
 
 ```mermaid
@@ -203,7 +205,7 @@ xychart-beta
     title "Quadratic Weighted Kappa (QWK) Across Versions"
     x-axis ["v1 Baseline", "v2 Improved", "v3 Final"]
     y-axis "QWK Score" 0.75 --> 0.90
-    bar [0.810, 0.838, 0.850]
+    bar [0.810, 0.838, 0.838]
 ```
 
 ### 5.2 Per-Class Performance (v2)
@@ -225,10 +227,10 @@ xychart-beta
     title "QWK: Model vs Published Human Radiologist Agreement"
     x-axis ["Radiologist\nInter-rater (lower)", "Radiologist\nInter-rater (upper)", "v1 Model", "v2 Model", "v3 Model"]
     y-axis "Quadratic Weighted Kappa" 0.5 --> 0.95
-    bar [0.65, 0.75, 0.81, 0.838, 0.850]
+    bar [0.65, 0.75, 0.81, 0.838, 0.838]
 ```
 
-Both the v2 (QWK = 0.838) and v3 (QWK ≥ 0.85) models **exceed the upper bound of published radiologist inter-rater agreement** for KL grading (κ ≈ 0.65–0.75). The v3 model is the strongest result and the candidate for prospective clinical validation.
+Both v2 (QWK = 0.8383) and v3 (QWK = 0.8376) **exceed the upper bound of published radiologist inter-rater agreement** for KL grading (κ ≈ 0.65–0.75), and sit within the published model range for this dataset (QWK 0.80–0.86). The two versions are statistically indistinguishable on QWK; v3 is the candidate for prospective clinical validation because its per-class balance is better (Grade 2 recall recovered without losing the Grade 1 gains).
 
 ---
 
@@ -285,13 +287,13 @@ Both the v2 (QWK = 0.838) and v3 (QWK ≥ 0.85) models **exceed the upper bound 
 ## 8. Recommendations
 
 ### Priority 1 — Prospective Validation on NHS X-rays *(updated — v3 complete)*
-v3 training is complete and achieved QWK ≥ 0.85, meeting its pre-defined target. The v3 model is now the candidate for prospective validation. Apply it to a held-out sample of real NHS X-ray images, graded independently by radiologists, to measure real-world performance and identify domain shift issues.
+v3 training is complete at QWK 0.838 — level with v2 and within the published model range for this dataset. The pre-defined QWK ≥ 0.85 target was not met by tuning alone (see Section 4); it is expected to require joint cropping (Priority 3). The v3 model is nonetheless the candidate for prospective validation: apply it to a held-out sample of real NHS X-ray images, graded independently by radiologists, to measure real-world performance and identify domain shift issues. Validation and the cropping work can proceed in parallel.
 
 ### Priority 2 — Add GradCAM Explainability
 Radiologists will not adopt a black-box system. GradCAM heatmaps overlaid on the X-ray show which anatomical region drove the prediction — joint space, osteophyte locations, subchondral bone. This is the critical trust-building step.
 
-### Priority 3 — Joint Cropping for Further Improvement
-If performance beyond QWK 0.85 is desired, **automated joint region cropping** (e.g., YOLOv8-nano trained on ~200 bounding box labels) isolates the tibio-femoral joint before classification. This removes uninformative background pixels and focuses the model on the exact anatomical region that defines KL grade. Published literature suggests +3–5 pp gain.
+### Priority 3 — Joint Cropping to Reach the QWK ≥ 0.85 Target
+This is the route to the original target. **Automated joint region cropping** (e.g., YOLOv8-nano trained on ~200 bounding box labels) isolates the tibio-femoral joint before classification. This removes uninformative background pixels and focuses the model on the exact anatomical region that defines KL grade. Published literature suggests +3–5 pp QWK gain, projecting the model into 0.87–0.88 territory.
 
 ### Priority 4 — Multi-Architecture Ensemble
 Ensemble v3 (EfficientNet-B4) with a second architecture (e.g., ConvNeXt-Small or Swin-Tiny) by averaging softmax outputs. Typically yields +1–3 pp QWK at inference time with no additional training data.
@@ -303,11 +305,11 @@ Before any clinical deployment, audit model performance stratified by patient ag
 
 ## 9. Conclusion
 
-The deep learning knee X-ray grading system has completed three development iterations and achieved its pre-defined target: **QWK ≥ 0.85**, exceeding published human radiologist inter-rater agreement (κ ≈ 0.65–0.75). All three pipeline versions progressively improved on every key metric.
+The deep learning knee X-ray grading system has completed three development iterations, reaching **QWK 0.838** — within the published model range for this dataset (0.80–0.86) and exceeding published human radiologist inter-rater agreement (κ ≈ 0.65–0.75). The pre-defined QWK ≥ 0.85 target was **not met by training improvements alone**: v3 matched v2 to within run-to-run noise, demonstrating that the model has reached the dataset's intrinsic ambiguity floor. That plateau is itself a finding — it tells us precisely where the next investment should go (joint cropping, projected QWK 0.87–0.88), and where it should not (further hyperparameter tuning).
 
-The model is technically ready for the next stage. The key remaining challenges are **clinical validation, regulatory compliance, and explainability** — not further model development. The path to deployment runs through prospective NHS data validation, GradCAM explainability integration, and clinician acceptance studies.
+The model is technically ready for the next stage. The key remaining work splits into two parallel tracks: **joint cropping** to close the gap to the 0.85 target, and **clinical validation, regulatory compliance, and explainability** to prepare for deployment. The path to deployment runs through prospective NHS data validation, GradCAM explainability integration, and clinician acceptance studies.
 
-> A QWK of 0.85 means the model disagrees with a given radiologist's grade no more often than two radiologists disagree with each other — and likely less. For Grade 3 and Grade 4 — the grades that drive surgical referral decisions — the model's discrimination is strong and clinically actionable.
+> A QWK of 0.84 means the model disagrees with the reference grade no more often than two radiologists typically disagree with each other. For Grade 3 and Grade 4 — the grades that drive surgical referral decisions — the model's discrimination is strong and clinically actionable. Grade 1 ("doubtful") remains the hardest boundary for model and humans alike, and deployed predictions at that grade should be flagged for human review.
 
 ---
 
@@ -325,8 +327,10 @@ The model is technically ready for the next stage. The key remaining challenges 
 | Discriminative LR | No | Yes | Yes |
 | Stopping metric | Accuracy | QWK | QWK |
 | TTA at inference | No | Yes | Yes |
-| **Final QWK** | ~0.81 | 0.838 | **≥ 0.85 ✓** |
-| **Final Accuracy** | 65.5% | 66.7% | **≥ 69% ✓** |
+| **Final QWK (TTA)** | ~0.81 | **0.8383** | 0.8376 |
+| **Final Accuracy (TTA)** | 65.5% | 66.7% | **66.9%** |
+| **Grade 1 F1** | 0.27 | **0.42** | 0.41 |
+| **Grade 2 F1** | — | 0.59 | **0.61** |
 
 ## Appendix B: Diagnostic Framework Used
 

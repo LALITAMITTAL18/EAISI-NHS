@@ -33,7 +33,8 @@ def compute_shap_local(
     feature_names = _extract_feature_names(preprocessor, X.columns.tolist())
 
     explainer, shap_vals = _fit_explainer(model, X_transformed)
-    base_value = float(explainer.expected_value) if hasattr(explainer, "expected_value") else 0.0
+    _ev = np.asarray(explainer.expected_value).ravel() if hasattr(explainer, "expected_value") else np.array([0.0])
+    base_value = float(_ev[0]) if _ev.size > 0 else 0.0
 
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[1] if len(shap_vals) == 2 else shap_vals[0]
@@ -76,7 +77,8 @@ def compute_shap_single_row(
     )
 
     explainer, shap_vals = _fit_explainer(model, X_transformed)
-    base_value = float(explainer.expected_value) if hasattr(explainer, "expected_value") else 0.0
+    _ev = np.asarray(explainer.expected_value).ravel() if hasattr(explainer, "expected_value") else np.array([0.0])
+    base_value = float(_ev[0]) if _ev.size > 0 else 0.0
 
     if isinstance(shap_vals, list):
         shap_vals = shap_vals[1] if len(shap_vals) == 2 else shap_vals[0]
@@ -89,19 +91,29 @@ def _fit_explainer(model, X_transformed):
     """Try TreeExplainer → LinearExplainer → KernelExplainer."""
     import shap
 
+    def _to_numpy(sv):
+        """Normalise shap_values output — handles Explanation objects (shap >= 0.45)."""
+        if hasattr(sv, "values"):
+            return sv.values
+        return sv
+
     try:
         explainer = shap.TreeExplainer(model)
-        return explainer, explainer.shap_values(X_transformed)
+        # check_additivity=False avoids the "0-dimensional array" bug with sklearn >= 1.6
+        sv = explainer.shap_values(X_transformed, check_additivity=False)
+        return explainer, _to_numpy(sv)
     except Exception:
         pass
     try:
         explainer = shap.LinearExplainer(model, X_transformed)
-        return explainer, explainer.shap_values(X_transformed)
+        sv = explainer.shap_values(X_transformed)
+        return explainer, _to_numpy(sv)
     except Exception:
         pass
     background = shap.sample(X_transformed, min(50, len(X_transformed)))
     explainer = shap.KernelExplainer(model.predict, background)
-    return explainer, explainer.shap_values(X_transformed, nsamples=100)
+    sv = explainer.shap_values(X_transformed, nsamples=100)
+    return explainer, _to_numpy(sv)
 
 
 def _extract_feature_names(preprocessor, original_cols: list[str]) -> list[str]:

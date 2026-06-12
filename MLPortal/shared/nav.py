@@ -35,9 +35,27 @@ _PAGE_PATHS: dict[str, str] = {
 
 def render_sidebar() -> None:
     """Draw the persistent sidebar with stage progress indicators.
-    
+
     Also enforces the project gate — if no project is active, redirects to app.py.
     """
+    # Streamlit only reveals the sidebar collapse arrow («) on hover, so users
+    # often don't realise the sidebar can be hidden. Keep both the collapse
+    # button and the expand button (» when hidden) permanently visible.
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebarCollapseButton"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="stExpandSidebarButton"] {
+            display: block !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     active = get_active_project()
     if active is None:
         st.warning("No project selected.")

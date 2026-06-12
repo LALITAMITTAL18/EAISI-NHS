@@ -1,5 +1,6 @@
 # Core
 streamlit>=1.35.0
+python-dotenv>=1.0.0
 pandas>=2.1.0
 numpy>=1.26.0
 scipy>=1.12.0
@@ -48,3 +49,12 @@ azure-identity>=1.16.0
 
 # Azure OpenAI / GPT-4o via AI Foundry (Stage 9 — Clinical Insight)
 openai>=1.30.0
+
+# Deep Learning — local EfficientNet-B4 inference (Stage 9 — Clinical Insight)
+# Install torch CPU-only to keep the venv lean (no CUDA drivers needed locally):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# Then install opencv from PyPI:
+#   pip install opencv-python-headless
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python-headless>=4.7.0

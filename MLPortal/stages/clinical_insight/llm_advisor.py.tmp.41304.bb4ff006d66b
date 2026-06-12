@@ -137,14 +137,6 @@ Return a JSON object with exactly these keys:
                 "caveats": [], "next_steps": [], "urgency": "Unknown"}
 
 
-def _strip_prefix(name: str) -> str:
-    """Remove sklearn ColumnTransformer prefixes for cleaner GPT-4o prompts."""
-    for prefix in ("numeric__", "categorical__", "remainder__", "cat__", "num__", "passthrough__"):
-        if name.lower().startswith(prefix):
-            return name[len(prefix):].replace("_", " ").strip()
-    return name.replace("_", " ").strip()
-
-
 def generate_shap_explanation(
     feature_names: list[str],
     shap_values: list[float],
@@ -154,8 +146,9 @@ def generate_shap_explanation(
 ) -> list[dict]:
     """Return a list of per-feature clinical explanations.
 
-    Each item: {feature, patient_value, shap, direction, clinical_explanation}
+    Each item: {feature, value, shap, direction, explanation}
     """
+    # Sort by absolute SHAP, take top_n
     pairs = sorted(
         zip(feature_names, shap_values),
         key=lambda x: abs(x[1]),
@@ -163,16 +156,13 @@ def generate_shap_explanation(
     )[:top_n]
 
     feature_lines = []
-    for raw_name, sval in pairs:
-        clean = _strip_prefix(raw_name)
-        # feature_values uses original (pre-transform) names; try both raw and cleaned
-        fval = feature_values.get(raw_name) or feature_values.get(clean) or "unknown"
+    for fname, sval in pairs:
+        fval = feature_values.get(fname, "unknown")
         direction = "increases" if sval > 0 else "decreases"
         feature_lines.append(
-            f'- {clean}: patient value={fval}, SHAP={sval:+.3f} ({direction} predicted benefit)'
+            f'- {fname}: value={fval}, SHAP={sval:+.3f} ({direction} predicted benefit)'
         )
 
-    # Prompt explicitly requests {"items": [...]} so the json_object wrapper is deterministic.
     prompt = f"""The Random Forest model predicts a post-surgical health gain of {prediction:.1f} OKS points.
 
 Top contributing features (SHAP analysis):
@@ -182,18 +172,17 @@ For each feature, explain in 1-2 plain sentences why this patient factor clinica
 increases or decreases expected surgical benefit. Use evidence-based reasoning \
 (e.g. pre-op score, BMI, comorbidities, age effects on TKR outcomes).
 
-Return a JSON object with exactly this structure:
-{{
-  "items": [
-    {{
-      "feature": "<clean feature name>",
-      "patient_value": "<value>",
-      "shap": <float>,
-      "direction": "positive" or "negative",
-      "clinical_explanation": "<1-2 sentences>"
-    }}
-  ]
-}}"""
+Return a JSON array:
+[
+  {{
+    "feature": "<feature name>",
+    "patient_value": "<value>",
+    "shap": <float>,
+    "direction": "positive" or "negative",
+    "clinical_explanation": "<1-2 sentences>"
+  }},
+  ...
+]"""
 
     client = _get_client()
     resp = client.chat.completions.create(
@@ -202,35 +191,25 @@ Return a JSON object with exactly this structure:
             {"role": "system", "content": _SYSTEM_SHAP},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=1200,
+        max_tokens=900,
         temperature=0.2,
         response_format={"type": "json_object"},
     )
     raw = resp.choices[0].message.content
     try:
         parsed = json.loads(raw)
-        # Primary path: {"items": [...]}
-        if "items" in parsed and isinstance(parsed["items"], list):
-            return parsed["items"]
-        # Fallback: any key whose value is a list of dicts
-        for val in parsed.values():
-            if isinstance(val, list) and val and isinstance(val[0], dict):
-                return val
-        # Last resort: flatten dict-of-dicts into a list
-        if all(isinstance(v, dict) for v in parsed.values()):
-            return list(parsed.values())
-        return []
+        # Handle both {"items": [...]} and plain [...]
+        if isinstance(parsed, list):
+            return parsed
+        for key in ("items", "features", "explanations", "results"):
+            if key in parsed and isinstance(parsed[key], list):
+                return parsed[key]
+        return list(parsed.values())[0] if parsed else []
     except Exception:
-        return [
-            {
-                "feature": _strip_prefix(k),
-                "patient_value": str(feature_values.get(k) or feature_values.get(_strip_prefix(k)) or ""),
-                "shap": v,
-                "direction": "positive" if v > 0 else "negative",
-                "clinical_explanation": "",
-            }
-            for k, v in pairs
-        ]
+        return [{"feature": k, "patient_value": feature_values.get(k, ""),
+                 "shap": v, "direction": "positive" if v > 0 else "negative",
+                 "clinical_explanation": ""}
+                for k, v in pairs]
 
 
 def _build_context(

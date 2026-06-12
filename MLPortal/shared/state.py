@@ -168,6 +168,10 @@ class SessionState(BaseModel):
     comparison_table: list[dict[str, Any]] = Field(default_factory=list)
     run_summary: dict[str, Any] = Field(default_factory=dict)
 
+    # Stage 9 — Clinical Insight: user choices (non-ephemeral)
+    # Heavy results (predictions, SHAP, LLM) are in session/clinical_insight_cache.json
+    clinical_insight_cfg: dict[str, Any] = Field(default_factory=dict)
+
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 

@@ -46,7 +46,7 @@ def init():
     raise FileNotFoundError(f"No .joblib file found under {model_dir}")
 
 
-def run(raw_data: str) -> str:
+def run(raw_data: str) -> dict:
     data = json.loads(raw_data)
     features: dict = data.get("features", {})
     compute_shap: bool = data.get("compute_shap", False)
@@ -86,10 +86,10 @@ def run(raw_data: str) -> str:
         except Exception as exc:
             logger.warning("SHAP computation failed: %s", exc)
 
-    return json.dumps(
-        {
-            "prediction": prediction,
-            "shap_values": shap_values,
-            "feature_names": feature_names,
-        }
-    )
+    # Return a dict, NOT json.dumps(...) — the AML inference server serialises
+    # the return value itself; a pre-encoded string gets double-encoded.
+    return {
+        "prediction": prediction,
+        "shap_values": shap_values,
+        "feature_names": feature_names,
+    }

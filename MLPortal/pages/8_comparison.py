@@ -37,7 +37,6 @@ from shared.state import (
 from stages.comparison.evaluator import (
     bland_altman_stats,
     calibration_by_decile,
-    compare_models,
     compute_pr_analysis,
     subgroup_eval,
 )
@@ -46,7 +45,6 @@ from stages.comparison.plots import (
     calibration_plot,
     confusion_matrix_heatmap,
     equity_bar,
-    metric_comparison_bar,
     pr_curves_grid_plot,
     regression_outcome_plot,
 )
@@ -83,9 +81,10 @@ if _KEY not in st.session_state:
     else:
         st.session_state[_KEY] = None
 
-# Tracks the user's explicit table selection as "Dataset | Model" string
+# Tracks the user's explicit table selection as "Dataset | Model" string.
+# Restored from metrics_summary so it survives navigating away and back.
 if "inv_combo" not in st.session_state:
-    st.session_state["inv_combo"] = None
+    st.session_state["inv_combo"] = state.metrics_summary.get("inv_combo")
 
 # ── Section A — Configuration ─────────────────────────────────────────────────
 with st.expander("⚙️ Analysis configuration", expanded=True):
@@ -373,7 +372,10 @@ else:
             _row_idx = _sel_event.selection.rows[0]
             _ds = pr_df_top.iloc[_row_idx]["Dataset"]
             _mdl = pr_df_top.iloc[_row_idx]["Model"]
-            st.session_state["inv_combo"] = f"{_ds} | {_mdl}"
+            _new_combo = f"{_ds} | {_mdl}"
+            st.session_state["inv_combo"] = _new_combo
+            # Persist immediately so it survives navigation
+            update_state({"metrics_summary": {**state.metrics_summary, "inv_combo": _new_combo}})
     except Exception:
         # Fallback for Streamlit versions that don't support on_select
         st.dataframe(pr_df_top.set_index(["Dataset", "Model"]), use_container_width=True)
@@ -451,25 +453,22 @@ if st.session_state["inv_combo"]:
         inv_target = inv_entry["target"]
         inv_test_path = inv_entry["test_path"]
 
-        # Load full variant (all models) for Bland-Altman and metric comparison bars
-        with st.spinner(f"Evaluating all models in {_inv_dataset}…"):
-            inv_results = load_variant_results(inv_slug, project_models_dir(), task_inv)
+        # Load only the test labels — predictions are already in inv_entry cache.
+        with st.spinner(f"Loading test data for {_inv_model}…"):
             inv_test_df = load_parquet(project_datasets_dir() / inv_test_path)
-            inv_X_test = inv_test_df.drop(columns=[inv_target], errors="ignore")
             inv_y_series = inv_test_df[inv_target]
-            inv_comparison = compare_models(inv_results, inv_X_test, inv_y_series, task_inv, dataset=_inv_dataset)
 
-        # Persist evaluated metrics so Stage 10 can read them
-        _inv_cache_path = project_models_dir() / f"{inv_slug}_results_cache.joblib"
-        save_joblib([r.model_dump() for r in inv_results], _inv_cache_path)
+        # Persist selection so Stage 10 and page-reload restore it correctly.
+        _updated_ms = {
+            **state.metrics_summary,
+            "best_model": _inv_model,
+            "best_dataset": _inv_dataset,
+            "tuned_threshold": tuned_thr,
+            "inv_combo": st.session_state["inv_combo"],
+        }
         update_state({
             "best_model_name": _inv_model,
-            "comparison_table": [r.model_dump() for r in inv_comparison.rows],
-            "metrics_summary": {
-                "best_model": _inv_model,
-                "best_dataset": _inv_dataset,
-                "tuned_threshold": tuned_thr,
-            },
+            "metrics_summary": _updated_ms,
         })
 
         # E1: Confusion matrices (regression)
@@ -512,37 +511,39 @@ if st.session_state["inv_combo"]:
                 regression_outcome_plot(
                     y_test_inv, y_pred_inv,
                     threshold=_active_thr,
+                    actual_threshold=float(mcid),
                     model_name=_inv_model,
                     positive_below=True,
-                    positive_label=f"No benefit (gain < {_active_thr:.3g})",
-                    negative_label=f"Benefit (gain ≥ {_active_thr:.3g})",
+                    positive_label=f"No benefit (gain < {mcid:.3g})",
+                    negative_label=f"Benefit (gain ≥ {mcid:.3g})",
                 ),
                 use_container_width=True,
             )
 
-            # E3: Bland-Altman + calibration
+            # E3: Bland-Altman + calibration (selected model only)
             st.markdown("#### Bland-Altman & calibration")
-            ba_all = [
-                bland_altman_stats(inv_y_series, r.pipeline.predict(inv_X_test), r.model_name)
-                for r in inv_results
-                if r.pipeline is not None
-            ]
+            ba_selected = bland_altman_stats(inv_y_series, y_pred_inv, _inv_model)
             cal = calibration_by_decile(inv_y_series, y_pred_inv, _inv_model)
             col1, col2 = st.columns(2)
             with col1:
-                st.plotly_chart(bland_altman_plot(ba_all, _inv_model), use_container_width=True)
+                st.plotly_chart(bland_altman_plot([ba_selected], _inv_model), use_container_width=True)
             with col2:
                 st.plotly_chart(calibration_plot(cal, _inv_model), use_container_width=True)
 
-        # E4: Metric comparison bars (all models in variant)
-        st.markdown("#### Metric comparison — all models in selected dataset")
-        _metric_options = {
-            "regression": [("test_rmse", True), ("test_mae", True), ("test_r2", False)],
-            "classification": [("f2", False), ("roc_auc", False), ("pr_auc", False), ("recall", False)],
-            "ordinal": [("ordinal_mae", True), ("exact_accuracy", False), ("adjacent_accuracy", False)],
-        }
-        for metric, lower_is_better in _metric_options.get(task_inv, []):
-            st.plotly_chart(metric_comparison_bar(inv_comparison, metric, lower_is_better), use_container_width=True)
+        # E4: Key metrics for the selected model
+        st.markdown("#### Performance metrics")
+        if task_inv == "regression":
+            from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+            _rmse = float(np.sqrt(mean_squared_error(inv_y_series, y_pred_inv)))
+            _mae = float(mean_absolute_error(inv_y_series, y_pred_inv))
+            _r2 = float(r2_score(inv_y_series, y_pred_inv))
+            _mc1, _mc2, _mc3 = st.columns(3)
+            with _mc1:
+                st.metric("RMSE", f"{_rmse:.3f}", help="Root mean squared error (lower is better)")
+            with _mc2:
+                st.metric("MAE", f"{_mae:.3f}", help="Mean absolute error (lower is better)")
+            with _mc3:
+                st.metric("R²", f"{_r2:.3f}", help="Coefficient of determination (higher is better)")
 
         # E5: Equity / subgroup analysis
         _MAX_GROUPS = 50
